@@ -26,7 +26,7 @@ MAX_UPLOADS = 5
 
 class GrokClient:
     """Grok API 客户端"""
-    
+
     _upload_sem = asyncio.Semaphore(MAX_UPLOADS)
 
     @staticmethod
@@ -35,17 +35,17 @@ class GrokClient:
         model = request["model"]
         content, images = GrokClient._extract_content(request["messages"])
         stream = request.get("stream", False)
-        
+
         # 获取模型信息
         info = Models.get_model_info(model)
         grok_model, mode = Models.to_grok(model)
         is_video = info.get("is_video_model", False)
-        
+
         # 视频模型限制
         if is_video and len(images) > 1:
             logger.warning(f"[Client] 视频模型仅支持1张图片，已截取前1张")
             images = images[:1]
-        
+
         return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream)
 
     @staticmethod
@@ -63,7 +63,8 @@ class GrokClient:
                 if is_video and img_ids and img_uris:
                     post_id = await GrokClient._create_post(img_ids[0], img_uris[0], token)
 
-                payload = GrokClient._build_payload(content, grok_model, mode, img_ids, img_uris, is_video, post_id)
+                payload = GrokClient._build_payload(
+                    content, grok_model, mode, img_ids, img_uris, is_video, post_id)
                 return await GrokClient._request(payload, token, model, stream, post_id)
 
             except GrokApiException as e:
@@ -77,7 +78,8 @@ class GrokClient:
                     raise
 
                 if i < MAX_RETRY - 1:
-                    logger.warning(f"[Client] 失败(状态:{status}), 重试 {i+1}/{MAX_RETRY}")
+                    logger.warning(
+                        f"[Client] 失败(状态:{status}), 重试 {i+1}/{MAX_RETRY}")
                     await asyncio.sleep(0.5)
 
         raise last_err or GrokApiException("请求失败", "REQUEST_ERROR")
@@ -86,10 +88,10 @@ class GrokClient:
     def _extract_content(messages: List[Dict]) -> Tuple[str, List[str]]:
         """提取文本和图片"""
         texts, images = [], []
-        
+
         for msg in messages:
             content = msg.get("content", "")
-            
+
             if isinstance(content, list):
                 for item in content:
                     if item.get("type") == "text":
@@ -99,7 +101,7 @@ class GrokClient:
                             images.append(url)
             else:
                 texts.append(content)
-        
+
         return "".join(texts), images
 
     @staticmethod
@@ -107,13 +109,13 @@ class GrokClient:
         """并发上传图片"""
         if not urls:
             return [], []
-        
+
         async def upload_limited(url):
             async with GrokClient._upload_sem:
                 return await ImageUploadManager.upload(url, token)
-        
+
         results = await asyncio.gather(*[upload_limited(u) for u in urls], return_exceptions=True)
-        
+
         ids, uris = [], []
         for url, result in zip(urls, results):
             if isinstance(result, Exception):
@@ -123,7 +125,7 @@ class GrokClient:
                 if fid:
                     ids.append(fid)
                     uris.append(furi)
-        
+
         return ids, uris
 
     @staticmethod
@@ -150,7 +152,7 @@ class GrokClient:
                 "fileAttachments": img_ids,
                 "toolOverrides": {"videoGen": True}
             }
-        
+
         # 标准载荷
         return {
             "temporary": setting.grok_config.get("temporary", True),
@@ -188,38 +190,49 @@ class GrokClient:
             # 构建请求
             headers = GrokClient._build_headers(token)
             if model == "grok-imagine-0.9":
-                ref_id = post_id or payload.get("fileAttachments", [""])[0]
+                file_attachments = payload.get("fileAttachments") or [""]
+                ref_id = post_id or (
+                    file_attachments[0] if file_attachments else "")
                 if ref_id:
                     headers["Referer"] = f"https://grok.com/imagine/{ref_id}"
-            
+
             proxy = setting.get_proxy("service")
             proxies = {"http": proxy, "https": proxy} if proxy else None
-            
+
+            if proxy:
+                logger.debug(f"[Client] 使用代理: {proxy}")
+            else:
+                logger.warning("[Client] 未配置代理，可能导致IP被拦截")
+
             # 执行请求
-            response = await asyncio.to_thread(
-                curl_requests.post,
-                API_ENDPOINT,
-                headers=headers,
-                data=orjson.dumps(payload),
-                impersonate=BROWSER,
-                timeout=TIMEOUT,
-                stream=True,
-                proxies=proxies
-            )
-            
+            try:
+                response = await asyncio.to_thread(
+                    curl_requests.post,
+                    API_ENDPOINT,
+                    headers=headers,
+                    data=orjson.dumps(payload),
+                    impersonate=BROWSER,
+                    timeout=TIMEOUT,
+                    stream=True,
+                    proxies=proxies
+                )
+            except Exception as e:
+                logger.error(f"[Client] 请求异常: {e}, 代理: {proxy}")
+                raise
+
             if response.status_code != 200:
                 GrokClient._handle_error(response, token)
-            
+
             # 成功 - 重置失败计数
             asyncio.create_task(token_manager.reset_failure(token))
-            
+
             # 处理响应
-            result = (GrokResponseProcessor.process_stream(response, token) if stream 
-                     else await GrokResponseProcessor.process_normal(response, token, model))
-            
+            result = (GrokResponseProcessor.process_stream(response, token) if stream
+                      else await GrokResponseProcessor.process_normal(response, token, model))
+
             asyncio.create_task(GrokClient._update_limits(token, model))
             return result
-            
+
         except curl_requests.RequestsError as e:
             logger.error(f"[Client] 网络错误: {e}")
             raise GrokApiException(f"网络错误: {e}", "NETWORK_ERROR") from e
@@ -239,6 +252,13 @@ class GrokClient:
     def _handle_error(response, token: str):
         """处理错误"""
         if response.status_code == 403:
+            # 尝试获取更详细的错误信息
+            try:
+                error_detail = response.text[:500] if hasattr(
+                    response, 'text') else ""
+                logger.debug(f"[Client] 403错误详情: {error_detail}")
+            except:
+                pass
             msg = "您的IP被拦截，请尝试以下方法之一: 1.更换IP 2.使用代理 3.配置CF值"
             data = {"cf_blocked": True, "status": 403}
             logger.warning(f"[Client] {msg}")
@@ -249,8 +269,9 @@ class GrokClient:
             except:
                 data = response.text
                 msg = data[:200] if data else "未知错误"
-        
-        asyncio.create_task(token_manager.record_failure(token, response.status_code, msg))
+
+        asyncio.create_task(token_manager.record_failure(
+            token, response.status_code, msg))
         raise GrokApiException(
             f"请求失败: {response.status_code} - {msg}",
             "HTTP_ERROR",
