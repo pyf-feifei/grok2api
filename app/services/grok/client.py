@@ -33,8 +33,12 @@ class GrokClient:
     async def openai_to_grok(request: dict):
         """转换OpenAI请求为Grok请求"""
         model = request["model"]
-        content, images = GrokClient._extract_content(request["messages"])
+        content, images, system_prompt = GrokClient._extract_content(
+            request["messages"])
         stream = request.get("stream", False)
+        aspect_ratio = request.get("aspect_ratio")
+        # 优先使用 duration（OpenAI 官方格式），如果没有则使用 video_length（兼容）
+        video_length = request.get("duration") or request.get("video_length")
 
         # 获取模型信息
         info = Models.get_model_info(model)
@@ -46,10 +50,10 @@ class GrokClient:
             logger.warning(f"[Client] 视频模型仅支持1张图片，已截取前1张")
             images = images[:1]
 
-        return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream)
+        return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream, aspect_ratio, video_length, system_prompt)
 
     @staticmethod
-    async def _retry(model: str, content: str, images: List[str], grok_model: str, mode: str, is_video: bool, stream: bool):
+    async def _retry(model: str, content: str, images: List[str], grok_model: str, mode: str, is_video: bool, stream: bool, aspect_ratio: Optional[str] = None, video_length: Optional[int] = None, system_prompt: Optional[str] = None):
         """重试请求"""
         last_err = None
 
@@ -64,7 +68,7 @@ class GrokClient:
                     post_id = await GrokClient._create_post(img_ids[0], img_uris[0], token)
 
                 payload = GrokClient._build_payload(
-                    content, grok_model, mode, img_ids, img_uris, is_video, post_id)
+                    content, grok_model, mode, img_ids, img_uris, is_video, post_id, aspect_ratio, video_length, system_prompt)
                 return await GrokClient._request(payload, token, model, stream, post_id)
 
             except GrokApiException as e:
@@ -85,13 +89,28 @@ class GrokClient:
         raise last_err or GrokApiException("请求失败", "REQUEST_ERROR")
 
     @staticmethod
-    def _extract_content(messages: List[Dict]) -> Tuple[str, List[str]]:
-        """提取文本和图片"""
+    def _extract_content(messages: List[Dict]) -> Tuple[str, List[str], Optional[str]]:
+        """提取文本、图片和系统提示词"""
         texts, images = [], []
+        system_prompt = None
 
         for msg in messages:
+            role = msg.get("role", "user")
             content = msg.get("content", "")
 
+            # 提取系统提示词（只取第一个 system 消息）
+            if role == "system" and system_prompt is None:
+                if isinstance(content, str):
+                    system_prompt = content
+                elif isinstance(content, list):
+                    # 系统提示词通常只有文本，但也要处理列表格式
+                    for item in content:
+                        if item.get("type") == "text":
+                            system_prompt = item.get("text", "")
+                            break
+                continue  # 系统消息不添加到用户消息中
+
+            # 提取用户和助手消息的文本和图片
             if isinstance(content, list):
                 for item in content:
                     if item.get("type") == "text":
@@ -102,7 +121,7 @@ class GrokClient:
             else:
                 texts.append(content)
 
-        return "".join(texts), images
+        return "".join(texts), images, system_prompt
 
     @staticmethod
     async def _upload(urls: List[str], token: str) -> Tuple[List[str], List[str]]:
@@ -140,24 +159,66 @@ class GrokClient:
         return None
 
     @staticmethod
-    def _build_payload(content: str, model: str, mode: str, img_ids: List[str], img_uris: List[str], is_video: bool = False, post_id: str = None) -> Dict:
+    def _build_payload(content: str, model: str, mode: str, img_ids: List[str], img_uris: List[str], is_video: bool = False, post_id: str = None, aspect_ratio: Optional[str] = None, video_length: Optional[int] = None, system_prompt: Optional[str] = None) -> Dict:
         """构建请求载荷"""
+        # 如果有系统提示词，将其添加到消息开头
+        if system_prompt:
+            # 将系统提示词和用户消息组合
+            full_message = f"{system_prompt}\n\n{content}" if content else system_prompt
+        else:
+            full_message = content
+
         # 视频模型特殊处理
         if is_video and img_uris:
             img_msg = f"https://grok.com/imagine/{post_id}" if post_id else f"https://assets.grok.com/post/{img_uris[0]}"
-            return {
+
+            # 检查用户提示词中是否已包含 --mode 参数
+            import re
+            mode_pattern = r'--mode=\w+'
+            has_mode = bool(re.search(mode_pattern, full_message))
+
+            # 如果用户没有指定 mode，默认使用 custom
+            if not has_mode:
+                message = f"{img_msg}  {full_message} --mode=custom"
+            else:
+                message = f"{img_msg}  {full_message}"
+
+            payload = {
                 "temporary": True,
                 "modelName": "grok-3",
-                "message": f"{img_msg}  {content} --mode=custom",
+                "message": message,
                 "fileAttachments": img_ids,
                 "toolOverrides": {"videoGen": True}
             }
+
+            # 添加 responseMetadata（如果提供了视频参数或 fileAttachments 不为空）
+            if img_ids:
+                response_metadata = {
+                    "modelConfigOverride": {
+                        "modelMap": {
+                            "videoGenModelConfig": {
+                                # 使用 fileAttachments 的第一个元素
+                                "parentPostId": img_ids[0]
+                            }
+                        }
+                    }
+                }
+
+                # 添加可选的视频参数
+                if aspect_ratio:
+                    response_metadata["modelConfigOverride"]["modelMap"]["videoGenModelConfig"]["aspectRatio"] = aspect_ratio
+                if video_length:
+                    response_metadata["modelConfigOverride"]["modelMap"]["videoGenModelConfig"]["videoLength"] = video_length
+
+                payload["responseMetadata"] = response_metadata
+
+            return payload
 
         # 标准载荷
         return {
             "temporary": setting.grok_config.get("temporary", True),
             "modelName": model,
-            "message": content,
+            "message": full_message,
             "fileAttachments": img_ids,
             "imageAttachments": [],
             "disableSearch": False,

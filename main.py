@@ -11,6 +11,7 @@ from app.services.grok.token import token_manager
 from app.api.v1.chat import router as chat_router
 from app.api.v1.models import router as models_router
 from app.api.v1.images import router as images_router
+from app.api.v1.gemini import router as gemini_router
 from app.api.admin.manage import router as admin_router
 
 # 导入MCP服务器（认证配置在server.py中完成）
@@ -84,6 +85,7 @@ register_exception_handlers(app)
 app.include_router(chat_router, prefix="/v1")
 app.include_router(models_router, prefix="/v1")
 app.include_router(images_router)
+app.include_router(gemini_router, prefix="/v1beta")  # Gemini兼容接口，路径为 /v1beta
 app.include_router(admin_router)
 
 # 挂载静态文件
@@ -111,4 +113,4 @@ app.mount("", mcp_app)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)

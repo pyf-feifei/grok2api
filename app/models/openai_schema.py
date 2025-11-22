@@ -16,6 +16,9 @@ class OpenAIChatRequest(BaseModel):
     temperature: Optional[float] = Field(0.7, ge=0, le=2, description="采样温度")
     max_tokens: Optional[int] = Field(None, ge=1, le=100000, description="最大Token数")
     top_p: Optional[float] = Field(1.0, ge=0, le=1, description="采样参数")
+    aspect_ratio: Optional[str] = Field(None, description="视频宽高比（如 '16:9', '2:3', '1:1'）")
+    duration: Optional[int] = Field(None, ge=1, le=60, description="视频时长（秒），符合 OpenAI Sora API 格式")
+    video_length: Optional[int] = Field(None, ge=1, le=60, description="视频长度（秒），兼容参数，优先使用 duration")
 
     @classmethod
     @field_validator('messages')
