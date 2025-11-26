@@ -78,7 +78,16 @@ class GrokResponseProcessor:
                         {"code": error.get("code")}
                     )
 
-                grok_resp = data.get("result", {}).get("response", {})
+                result_data = data.get("result")
+                if result_data is None:
+                    # 某些chunk可能result为None（中间状态），尝试检查是否有其他有效数据
+                    if "response" not in data and "error" not in data:
+                        logger.debug(f"[Processor] Grok响应中result为None且无其他数据，跳过此chunk")
+                        continue
+                    # 如果data中直接有response，使用它
+                    grok_resp = data.get("response", {})
+                else:
+                    grok_resp = result_data.get("response", {})
                 
                 # 视频响应
                 if video_resp := grok_resp.get("streamingVideoGenerationResponse"):
@@ -189,7 +198,16 @@ class GrokResponseProcessor:
                         yield "data: [DONE]\n\n"
                         return
 
-                    grok_resp = data.get("result", {}).get("response", {})
+                    result_data = data.get("result")
+                    if result_data is None:
+                        # 某些chunk可能result为None（中间状态），尝试检查是否有其他有效数据
+                        if "response" not in data and "error" not in data:
+                            logger.debug(f"[Processor] Grok响应中result为None且无其他数据，跳过此chunk")
+                            continue
+                        # 如果data中直接有response，使用它
+                        grok_resp = data.get("response", {})
+                    else:
+                        grok_resp = result_data.get("response", {})
                     logger.debug(f"[Processor] 解析响应: {len(grok_resp)} bytes")
                     if not grok_resp:
                         continue
@@ -373,6 +391,7 @@ class GrokResponseProcessor:
         """构建视频内容"""
         logger.debug(f"[Processor] 检测到视频: {video_url}")
         full_url = f"https://assets.grok.com/{video_url}"
+        local_url = None
         
         try:
             cache_path = await video_cache_service.download_video(f"/{video_url}", auth_token)
@@ -380,11 +399,17 @@ class GrokResponseProcessor:
                 video_path = video_url.replace('/', '-')
                 base_url = setting.global_config.get("base_url", "")
                 local_url = f"{base_url}/images/{video_path}" if base_url else f"/images/{video_path}"
-                return f'<video src="{local_url}" controls="controls" width="500" height="300"></video>\\n'
+                # 返回包含视频 URL 的内容，方便提取
+                video_html = f'<video src="{local_url}" controls="controls" width="500" height="300"></video>'
+                video_url_text = f"\n\n视频地址: {local_url}\n原始地址: {full_url}"
+                return f"{video_html}{video_url_text}\\n"
         except Exception as e:
             logger.warning(f"[Processor] 缓存视频失败: {e}")
         
-        return f'<video src="{full_url}" controls="controls" width="500" height="300"></video>\\n'
+        # 如果没有本地缓存，返回原始 URL
+        video_html = f'<video src="{full_url}" controls="controls" width="500" height="300"></video>'
+        video_url_text = f"\n\n视频地址: {full_url}"
+        return f"{video_html}{video_url_text}\\n"
 
     @staticmethod
     async def _append_images(content: str, images: list, auth_token: str) -> str:

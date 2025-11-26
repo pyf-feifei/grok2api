@@ -32,28 +32,71 @@ class GrokClient:
     @staticmethod
     async def openai_to_grok(request: dict):
         """转换OpenAI请求为Grok请求"""
+        # 打印上传的原始请求内容
+        logger.info("=" * 80)
+        logger.info("[Client] ========== 上传的原始请求内容 ==========")
+        logger.info(f"[Client] 模型: {request.get('model')}")
+        logger.info(f"[Client] 流式: {request.get('stream', False)}")
+        logger.info(f"[Client] 消息数量: {len(request.get('messages', []))}")
+        logger.info(f"[Client] 完整消息列表:")
+        for idx, msg in enumerate(request.get('messages', [])):
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            if isinstance(content, str):
+                # 截断过长的内容
+                content_preview = content[:500] + "..." if len(content) > 500 else content
+                logger.info(f"[Client]   [{idx}] {role}: {content_preview}")
+            elif isinstance(content, list):
+                logger.info(f"[Client]   [{idx}] {role}: [多部分内容，共{len(content)}项]")
+                for part_idx, part in enumerate(content):
+                    part_type = part.get('type', 'unknown')
+                    if part_type == 'text':
+                        text_preview = part.get('text', '')[:200] + "..." if len(part.get('text', '')) > 200 else part.get('text', '')
+                        logger.info(f"[Client]     - {part_type}: {text_preview}")
+                    elif part_type == 'image_url':
+                        img_url = part.get('image_url', {}).get('url', '')[:100] + "..." if len(part.get('image_url', {}).get('url', '')) > 100 else part.get('image_url', {}).get('url', '')
+                        logger.info(f"[Client]     - {part_type}: {img_url}")
+            else:
+                logger.info(f"[Client]   [{idx}] {role}: {type(content)}")
+        logger.info("=" * 80)
+        
         model = request["model"]
         content, images, system_prompt = GrokClient._extract_content(
             request["messages"])
+        
+        # 打印提取后的内容
+        logger.info("[Client] ========== 提取后的内容 ==========")
+        logger.info(f"[Client] 合并后的文本内容长度: {len(content)} 字符")
+        content_preview = content[:1000] + "..." if len(content) > 1000 else content
+        logger.info(f"[Client] 合并后的文本内容预览: {content_preview}")
+        logger.info(f"[Client] 图片数量: {len(images)}")
+        if images:
+            for idx, img in enumerate(images):
+                img_preview = img[:100] + "..." if len(img) > 100 else img
+                logger.info(f"[Client]   [{idx}] {img_preview}")
+        logger.info(f"[Client] 系统提示词: {system_prompt[:200] + '...' if system_prompt and len(system_prompt) > 200 else system_prompt}")
+        logger.info("=" * 80)
+        
         stream = request.get("stream", False)
         aspect_ratio = request.get("aspect_ratio")
         # 优先使用 duration（OpenAI 官方格式），如果没有则使用 video_length（兼容）
         video_length = request.get("duration") or request.get("video_length")
+        # 是否强制禁用视频生成（仅用于 DashScope 图生图接口，不影响正常聊天、Gemini、文生图、图生视频等接口）
+        force_disable_video = request.get("force_disable_video", False)
 
         # 获取模型信息
         info = Models.get_model_info(model)
         grok_model, mode = Models.to_grok(model)
-        is_video = info.get("is_video_model", False)
+        is_video = info.get("is_video_model", False) and not force_disable_video
 
-        # 视频模型限制
+        # 视频模型支持多张图片（不再限制为1张）
         if is_video and len(images) > 1:
-            logger.warning(f"[Client] 视频模型仅支持1张图片，已截取前1张")
-            images = images[:1]
+            logger.info(f"[Client] 视频模型支持多张图片，共 {len(images)} 张")
 
-        return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream, aspect_ratio, video_length, system_prompt)
+        return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream, aspect_ratio, video_length, system_prompt, force_disable_video)
 
     @staticmethod
-    async def _retry(model: str, content: str, images: List[str], grok_model: str, mode: str, is_video: bool, stream: bool, aspect_ratio: Optional[str] = None, video_length: Optional[int] = None, system_prompt: Optional[str] = None):
+    async def _retry(model: str, content: str, images: List[str], grok_model: str, mode: str, is_video: bool, stream: bool, aspect_ratio: Optional[str] = None, video_length: Optional[int] = None, system_prompt: Optional[str] = None, force_disable_video: bool = False):
         """重试请求"""
         last_err = None
 
@@ -62,14 +105,47 @@ class GrokClient:
                 token = token_manager.get_token(model)
                 img_ids, img_uris = await GrokClient._upload(images, token)
 
-                # 视频模型创建会话
-                post_id = None
+                # 视频模型创建会话（为所有图片创建 post，但只使用第一个作为 parentPostId）
+                post_ids = []
                 if is_video and img_ids and img_uris:
-                    post_id = await GrokClient._create_post(img_ids[0], img_uris[0], token)
+                    logger.info(f"[Client] ========== 开始为 {len(images)} 张图片创建 post ==========")
+                    for idx, (img_id, img_uri) in enumerate(zip(img_ids, img_uris)):
+                        # 获取对应的原始图片 URL
+                        original_url = images[idx] if idx < len(images) else "未知"
+                        
+                        post_id = await GrokClient._create_post(img_id, img_uri, token)
+                        if post_id:
+                            post_ids.append(post_id)
+                            # 判断是首帧还是尾帧
+                            if len(img_ids) == 1:
+                                frame_type = "单帧"
+                            elif idx == 0:
+                                frame_type = "首帧"
+                            elif idx == len(img_ids) - 1:
+                                frame_type = "尾帧"
+                            else:
+                                frame_type = f"第{idx+1}帧"
+                            
+                            # 截断过长的 URL
+                            url_preview = original_url[:100] + "..." if len(original_url) > 100 else original_url
+                            logger.info(f"[Client] {frame_type} - Post ID: {post_id}")
+                            logger.info(f"[Client] {frame_type} - 图片 URL: {url_preview}")
+                    
+                    logger.info(f"[Client] 为 {len(img_ids)} 张图片创建了 {len(post_ids)} 个 post")
+                    if len(post_ids) >= 2:
+                        logger.info(f"[Client] ========== 首尾帧对应关系 ==========")
+                        logger.info(f"[Client] 首帧 Post ID: {post_ids[0]}")
+                        first_url = images[0] if len(images) > 0 else "未知"
+                        logger.info(f"[Client] 首帧图片: {first_url[:100]}...")
+                        logger.info(f"[Client] 尾帧 Post ID: {post_ids[-1]}")
+                        last_url = images[-1] if len(images) > 0 else "未知"
+                        logger.info(f"[Client] 尾帧图片: {last_url[:100]}...")
 
                 payload = GrokClient._build_payload(
-                    content, grok_model, mode, img_ids, img_uris, is_video, post_id, aspect_ratio, video_length, system_prompt)
-                return await GrokClient._request(payload, token, model, stream, post_id)
+                    content, grok_model, mode, img_ids, img_uris, is_video, post_ids, aspect_ratio, video_length, system_prompt, force_disable_video)
+                # 使用第一个 post_id 作为 referer
+                first_post_id = post_ids[0] if post_ids else None
+                return await GrokClient._request(payload, token, model, stream, first_post_id)
 
             except GrokApiException as e:
                 last_err = e
@@ -159,7 +235,7 @@ class GrokClient:
         return None
 
     @staticmethod
-    def _build_payload(content: str, model: str, mode: str, img_ids: List[str], img_uris: List[str], is_video: bool = False, post_id: str = None, aspect_ratio: Optional[str] = None, video_length: Optional[int] = None, system_prompt: Optional[str] = None) -> Dict:
+    def _build_payload(content: str, model: str, mode: str, img_ids: List[str], img_uris: List[str], is_video: bool = False, post_ids: List[str] = None, aspect_ratio: Optional[str] = None, video_length: Optional[int] = None, system_prompt: Optional[str] = None, force_disable_video: bool = False) -> Dict:
         """构建请求载荷"""
         # 如果有系统提示词，将其添加到消息开头
         if system_prompt:
@@ -170,7 +246,19 @@ class GrokClient:
 
         # 视频模型特殊处理
         if is_video and img_uris:
-            img_msg = f"https://grok.com/imagine/{post_id}" if post_id else f"https://assets.grok.com/post/{img_uris[0]}"
+            # 构建多个图片 URL（支持多张图片）
+            img_urls = []
+            if post_ids:
+                # 如果有 post_ids，使用 grok.com/imagine/{post_id} 格式
+                for post_id in post_ids:
+                    img_urls.append(f"https://grok.com/imagine/{post_id}")
+            else:
+                # 如果没有 post_ids，使用 assets.grok.com/post/{uri} 格式
+                for img_uri in img_uris:
+                    img_urls.append(f"https://assets.grok.com/post/{img_uri}")
+            
+            # 将所有图片 URL 用空格连接
+            img_msg = " ".join(img_urls)
 
             # 检查用户提示词中是否已包含 --mode 参数
             import re
@@ -188,7 +276,7 @@ class GrokClient:
                 "modelName": "grok-3",
                 "message": message,
                 "fileAttachments": img_ids,
-                "toolOverrides": {"videoGen": True}
+                "toolOverrides": {"videoGen": True} if not force_disable_video else {}
             }
 
             # 添加 responseMetadata（如果提供了视频参数或 fileAttachments 不为空）
@@ -197,8 +285,8 @@ class GrokClient:
                     "modelConfigOverride": {
                         "modelMap": {
                             "videoGenModelConfig": {
-                                # 使用 fileAttachments 的第一个元素
-                                "parentPostId": img_ids[0]
+                                # 使用第一个 post_id 作为 parentPostId（如果有多张图片，使用第一张的 post_id）
+                                "parentPostId": post_ids[0] if post_ids else img_ids[0]
                             }
                         }
                     }
@@ -212,10 +300,38 @@ class GrokClient:
 
                 payload["responseMetadata"] = response_metadata
 
+            # 打印视频模型的 payload
+            logger.info("[Client] ========== 处理后发送给 Grok API 的内容 (视频模型) ==========")
+            logger.info(f"[Client] 接口: {API_ENDPOINT}")
+            logger.info(f"[Client] 模型: {payload.get('modelName')}")
+            logger.info(f"[Client] 消息长度: {len(payload.get('message', ''))} 字符")
+            message_preview = payload.get('message', '')[:1000] + "..." if len(payload.get('message', '')) > 1000 else payload.get('message', '')
+            logger.info(f"[Client] 消息内容预览: {message_preview}")
+            logger.info(f"[Client] 文件附件数量: {len(payload.get('fileAttachments', []))}")
+            if payload.get('fileAttachments'):
+                for idx, fid in enumerate(payload.get('fileAttachments', [])):
+                    frame_type = "首帧" if idx == 0 else f"第{idx+1}帧" if idx < len(payload.get('fileAttachments', [])) - 1 else "尾帧"
+                    logger.info(f"[Client]   [{idx}] {frame_type} - 文件ID: {fid}")
+            
+            # 显示首尾帧对应关系
+            if post_ids and len(post_ids) >= 2:
+                logger.info(f"[Client] ========== 首尾帧对应关系 ==========")
+                logger.info(f"[Client] 首帧 Post ID: {post_ids[0]} (对应 message 中第一个图片 URL)")
+                logger.info(f"[Client] 尾帧 Post ID: {post_ids[-1]} (对应 message 中最后一个图片 URL)")
+                logger.info(f"[Client] parentPostId (使用首帧): {payload.get('responseMetadata', {}).get('modelConfigOverride', {}).get('modelMap', {}).get('videoGenModelConfig', {}).get('parentPostId')}")
+            logger.info(f"[Client] 完整 Payload (JSON):")
+            try:
+                payload_json = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8')
+                logger.info(f"[Client] {payload_json}")
+            except Exception as e:
+                logger.warning(f"[Client] 无法序列化 payload: {e}")
+                logger.info(f"[Client] {payload}")
+            logger.info("=" * 80)
+
             return payload
 
         # 标准载荷
-        return {
+        payload = {
             "temporary": setting.grok_config.get("temporary", True),
             "modelName": model,
             "message": full_message,
@@ -228,7 +344,6 @@ class GrokClient:
             "enableImageStreaming": True,
             "imageGenerationCount": 2,
             "forceConcise": False,
-            "toolOverrides": {},
             "enableSideBySide": True,
             "sendFinalMetadata": True,
             "isReasoning": False,
@@ -240,6 +355,35 @@ class GrokClient:
             "modelMode": mode,
             "isAsyncChat": False
         }
+        
+        # 只有在 DashScope 图生图接口需要禁用视频生成时才添加 toolOverrides
+        # 注意：正常聊天、Gemini、文生图、图生视频等接口不会传递 force_disable_video，因此不受影响
+        if force_disable_video:
+            payload["toolOverrides"] = {"videoGen": False}
+        
+        # 打印构建的 payload（发送给 Grok API 的内容）
+        logger.info("[Client] ========== 处理后发送给 Grok API 的内容 ==========")
+        logger.info(f"[Client] 接口: {API_ENDPOINT}")
+        logger.info(f"[Client] 模型: {payload.get('modelName')}")
+        logger.info(f"[Client] 模式: {payload.get('modelMode')}")
+        logger.info(f"[Client] 临时会话: {payload.get('temporary')}")
+        logger.info(f"[Client] 消息长度: {len(payload.get('message', ''))} 字符")
+        message_preview = payload.get('message', '')[:1000] + "..." if len(payload.get('message', '')) > 1000 else payload.get('message', '')
+        logger.info(f"[Client] 消息内容预览: {message_preview}")
+        logger.info(f"[Client] 文件附件数量: {len(payload.get('fileAttachments', []))}")
+        if payload.get('fileAttachments'):
+            for idx, fid in enumerate(payload.get('fileAttachments', [])):
+                logger.info(f"[Client]   [{idx}] 文件ID: {fid}")
+        logger.info(f"[Client] 完整 Payload (JSON):")
+        try:
+            payload_json = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8')
+            logger.info(f"[Client] {payload_json}")
+        except Exception as e:
+            logger.warning(f"[Client] 无法序列化 payload: {e}")
+            logger.info(f"[Client] {payload}")
+        logger.info("=" * 80)
+        
+        return payload
 
     @staticmethod
     async def _request(payload: dict, token: str, model: str, stream: bool, post_id: str = None):

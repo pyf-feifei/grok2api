@@ -21,6 +21,7 @@
 ### 视频生成功能
 
 - 选择 `grok-imagine-0.9` 模型，传入图片和提示词即可（方式和 OpenAI 的图片分析调用格式一致）
+- **支持单张或多张图片生成视频**（多张图片时，系统会自动为每张图片创建 post，并在 message 中拼接所有图片 URL）
 - 返回格式为 `<video src="{full_video_url}" controls="controls"></video>`
 - **注意：Grok 的视频直链受 403 限制，系统自动缓存图片到本地。必须正确设置 `Base Url` 以确保视频能正常显示！**
 
@@ -97,6 +98,42 @@ curl https://你的服务器地址/v1/chat/completions \
       }
     ],
     "aspect_ratio": "16:9",
+    "duration": 6
+  }'
+```
+
+**多张图片生成视频示例：**
+
+```
+curl https://你的服务器地址/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -d '{
+    "model": "grok-imagine-0.9",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "将这些图片合成为视频 --mode=normal"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://origin.picgo.net/2025/10/30/image6533bd16d52aff8c.jpg"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://origin.picgo.net/2025/10/30/imageb171f51936480634.jpg"
+            }
+          }
+        ]
+      }
+    ],
+    "aspect_ratio": "2:3",
     "duration": 6
   }'
 ```

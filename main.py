@@ -12,6 +12,8 @@ from app.api.v1.chat import router as chat_router
 from app.api.v1.models import router as models_router
 from app.api.v1.images import router as images_router
 from app.api.v1.gemini import router as gemini_router
+from app.api.v1.dashscope import router as dashscope_router
+from app.api.v1.tasks import router as tasks_router
 from app.api.admin.manage import router as admin_router
 
 # 导入MCP服务器（认证配置在server.py中完成）
@@ -86,6 +88,8 @@ app.include_router(chat_router, prefix="/v1")
 app.include_router(models_router, prefix="/v1")
 app.include_router(images_router)
 app.include_router(gemini_router, prefix="/v1beta")  # Gemini兼容接口，路径为 /v1beta
+app.include_router(dashscope_router)  # DashScope兼容接口，路径为 /v1/services/aigc
+app.include_router(tasks_router)  # 任务查询接口，路径为 /v1/tasks
 app.include_router(admin_router)
 
 # 挂载静态文件
