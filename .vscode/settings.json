@@ -1,0 +1,12 @@
+{
+  // Cline 配置 - 使用 LiteLLM 代理
+  "cline.apiProvider": "openai-compatible",
+  "cline.baseUrl": "http://localhost:15040",
+  "cline.apiKey": "sk-test",
+  "cline.model": "grok-4.1",
+  // 可选：其他 Cline 设置
+  "cline.enableCodeActions": true,
+  "cline.enableInlineCompletion": true,
+  // 注意：如果 LiteLLM 运行在不同端口，请修改 baseUrl
+  // 例如：如果 LiteLLM 在 8000 端口，改为 "http://localhost:8000"
+}
