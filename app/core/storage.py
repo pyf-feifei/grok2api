@@ -79,8 +79,18 @@ class FileStorage(BaseStorage):
 
     async def _write(self, path: Path, content: str) -> None:
         """写入文件"""
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            await f.write(content)
+        # 先写入临时文件，再原子性重命名，避免数据损坏
+        temp_path = path.with_suffix(path.suffix + '.tmp')
+        try:
+            async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
+                await f.write(content)
+                await f.flush()
+            # 原子性重命名
+            temp_path.replace(path)
+        except Exception as e:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise
 
     async def _load_json(self, path: Path, default: Dict, lock: asyncio.Lock) -> Dict[str, Any]:
         """加载JSON"""

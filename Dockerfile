@@ -4,8 +4,10 @@ FROM python:3.11-slim AS builder
 WORKDIR /build
 
 # 安装依赖到独立目录
-COPY requirements.txt .
-RUN pip install --no-cache-dir --only-binary=:all: --prefix=/install -r requirements.txt && \
+# 从 pyproject.toml 安装依赖（需要项目结构）
+COPY pyproject.toml .
+COPY app/ ./app/
+RUN pip install --no-cache-dir --only-binary=:all: --prefix=/install . && \
     find /install -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
     find /install -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
     find /install -type d -name "test" -exec rm -rf {} + 2>/dev/null || true && \
@@ -45,4 +47,5 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 增加超时设置以适应 Docker 环境的文件 I/O
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "75", "--timeout-graceful-shutdown", "30"]

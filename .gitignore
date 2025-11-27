@@ -184,3 +184,8 @@ cython_debug/
 .cursorindexingignore# Project data directory (contains sensitive tokens and temp files)
 data/
 
+# Docker build scripts and documentation
+build-and-push.ps1
+build-and-push.sh
+DOCKER_BUILD.md
+
