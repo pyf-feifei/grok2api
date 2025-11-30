@@ -104,3 +104,12 @@ class OpenAIChatCompletionChunkResponse(BaseModel):
     model: str = Field(..., description="模型")
     system_fingerprint: Optional[str] = Field(default=None, description="系统指纹")
     choices: List[OpenAIChatCompletionChunkChoice] = Field(..., description="选项")
+
+
+class OpenAITTSRequest(BaseModel):
+    """OpenAI TTS请求"""
+    model: str = Field(default="tts-1", description="模型名称")
+    input: str = Field(..., description="要转换的文本", min_length=1)
+    voice: Optional[str] = Field(default="alloy", description="语音类型（Grok可能不支持，保留兼容性）")
+    response_format: Optional[str] = Field(default="wav", description="响应格式（Grok返回wav）")
+    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0, description="语速（Grok可能不支持）")

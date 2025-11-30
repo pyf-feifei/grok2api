@@ -15,6 +15,7 @@ from app.api.v1.gemini import router as gemini_router
 from app.api.v1.dashscope import router as dashscope_router
 from app.api.v1.tasks import router as tasks_router
 from app.api.v1.anthropic import router as anthropic_router
+from app.api.v1.tts import router as tts_router
 from app.api.admin.manage import router as admin_router
 
 # 导入MCP服务器（认证配置在server.py中完成）
@@ -92,6 +93,7 @@ app.include_router(gemini_router, prefix="/v1beta")  # Gemini兼容接口，路�
 app.include_router(dashscope_router)  # DashScope兼容接口，路径为 /v1/services/aigc
 app.include_router(tasks_router)  # 任务查询接口，路径为 /v1/tasks
 app.include_router(anthropic_router, prefix="/v1")  # Anthropic兼容接口，路径为 /v1/messages
+app.include_router(tts_router, prefix="/v1")  # TTS接口，路径为 /v1/audio/speech
 app.include_router(admin_router)
 
 # 挂载静态文件
