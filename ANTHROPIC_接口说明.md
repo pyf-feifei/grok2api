@@ -80,7 +80,6 @@ with client.messages.stream(
 ## 📖 详细文档
 
 - **完整 API 文档**: `ANTHROPIC_API.md`
-- **快速开始**: `ANTHROPIC_QUICKSTART.md`
 - **测试示例**: `ANTHROPIC_DEMO.py` 或 `test_anthropic.py`
 
 ---
@@ -137,6 +136,8 @@ A: 使用 SDK 的 `messages.stream()` 方法
 ---
 
 **就是这么简单！** 🚀
+
+
 
 
 
