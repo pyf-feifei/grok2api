@@ -19,13 +19,17 @@ class AnthropicChatRequest(BaseModel):
     model: str = Field(..., description="模型名称", min_length=1)
     messages: List[AnthropicMessage] = Field(..., description="消息列表", min_length=1)
     max_tokens: int = Field(4096, ge=1, le=100000, description="最大Token数")
-    system: Optional[str] = Field(None, description="系统提示词")
+    # system 可以是字符串或数组（Claude Code 发送数组格式）
+    system: Optional[Union[str, List[Dict[str, Any]]]] = Field(None, description="系统提示词")
     temperature: Optional[float] = Field(1.0, ge=0, le=2, description="采样温度")
     top_p: Optional[float] = Field(None, ge=0, le=1, description="采样参数")
     top_k: Optional[int] = Field(None, ge=1, description="Top-K采样")
     stream: Optional[bool] = Field(False, description="流式响应")
     stop_sequences: Optional[List[str]] = Field(None, description="停止序列")
     metadata: Optional[Dict[str, Any]] = Field(None, description="元数据")
+    # Claude Code 可能发送的额外字段
+    tools: Optional[List[Dict[str, Any]]] = Field(None, description="工具列表")
+    tool_choice: Optional[Dict[str, Any]] = Field(None, description="工具选择")
 
     @classmethod
     @field_validator('messages')
@@ -105,6 +109,18 @@ class AnthropicStreamEvent(BaseModel):
     content_block: Optional[Dict[str, Any]] = Field(None, description="内容块")
     message: Optional[Dict[str, Any]] = Field(None, description="消息")
     usage: Optional[AnthropicUsage] = Field(None, description="使用统计")
+
+
+class AnthropicCountTokensRequest(BaseModel):
+    """Anthropic token 计数请求"""
+    messages: List[AnthropicMessage] = Field(..., description="消息列表")
+    model: str = Field(..., description="模型名称")
+    system: Optional[Union[str, List[Dict[str, Any]]]] = Field(None, description="系统提示词")
+
+
+class AnthropicCountTokensResponse(BaseModel):
+    """Anthropic token 计数响应"""
+    input_tokens: int = Field(..., description="输入token数")
 
 
 

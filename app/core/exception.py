@@ -68,8 +68,49 @@ def build_error_response(message: str, error_type: str, code: str = None, param:
     return {"error": error}
 
 
+def build_anthropic_error_response(error_type: str, message: str) -> dict:
+    """构建 Anthropic 兼容的错误响应"""
+    return {
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message
+        }
+    }
+
+
 async def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
     """处理HTTP异常"""
+    # 如果 detail 是字典，检查具体格式
+    if isinstance(exc.detail, dict):
+        # 检查是否是 Anthropic 格式的错误（来自 anthropic.py）
+        if "type" in exc.detail and exc.detail.get("type") == "error":
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=exc.detail
+            )
+        
+        # 检查是否是认证错误（来自 auth.py）- error 是字典
+        if "error" in exc.detail and isinstance(exc.detail["error"], dict):
+            error_info = exc.detail["error"]
+            error_type = error_info.get("type", "api_error")
+            message = error_info.get("message", "未知错误")
+            # 返回 Anthropic 兼容格式
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=build_anthropic_error_response(error_type, message)
+            )
+        
+        # 其他字典格式（如 admin 接口）- error 是字符串
+        if "error" in exc.detail and isinstance(exc.detail["error"], str):
+            message = exc.detail["error"]
+            error_type, _ = HTTP_ERROR_MAP.get(exc.status_code, ("api_error", message))
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=build_error_response(message, error_type, exc.detail.get("code"))
+            )
+    
+    # 默认处理
     error_type, default_msg = HTTP_ERROR_MAP.get(exc.status_code, ("api_error", str(exc.detail)))
     message = str(exc.detail) if exc.detail else default_msg
 

@@ -3,7 +3,7 @@
 import time
 import uuid
 import orjson
-from typing import Dict, Any, List, AsyncGenerator
+from typing import Dict, Any, List, AsyncGenerator, Union
 
 from app.core.logger import logger
 
@@ -12,18 +12,48 @@ class AnthropicConverter:
     """Anthropic 和 OpenAI 格式转换器"""
 
     @staticmethod
+    def _extract_system_content(system: Any) -> str:
+        """从 system 字段提取文本内容（支持字符串和数组格式）"""
+        if system is None:
+            return ""
+        
+        # 字符串格式
+        if isinstance(system, str):
+            return system
+        
+        # 数组格式（Claude Code 发送的格式）
+        if isinstance(system, list):
+            texts = []
+            for block in system:
+                if isinstance(block, dict):
+                    block_type = block.get("type", "")
+                    if block_type == "text":
+                        texts.append(block.get("text", ""))
+                    elif "text" in block:
+                        texts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    texts.append(block)
+            return "\n".join(texts)
+        
+        # 其他格式尝试转换为字符串
+        return str(system)
+
+    @staticmethod
     def to_openai_format(anthropic_request: Dict[str, Any]) -> Dict[str, Any]:
         """将 Anthropic 请求转换为 OpenAI 格式"""
         
         # 构建 OpenAI 格式的消息列表
         openai_messages = []
         
-        # 添加系统消息（如果有）
-        if system := anthropic_request.get("system"):
-            openai_messages.append({
-                "role": "system",
-                "content": system
-            })
+        # 添加系统消息（如果有）- 支持字符串和数组格式
+        system = anthropic_request.get("system")
+        if system:
+            system_content = AnthropicConverter._extract_system_content(system)
+            if system_content:
+                openai_messages.append({
+                    "role": "system",
+                    "content": system_content
+                })
         
         # 转换消息
         for msg in anthropic_request.get("messages", []):
