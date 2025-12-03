@@ -111,38 +111,10 @@ class AnthropicChatRequest(BaseModel):
         return "grok-4.1"
 
 
-class AnthropicContentBlock(BaseModel):
-    """Anthropic 内容块"""
-    type: str = Field(..., description="类型")
-    text: Optional[str] = Field(None, description="文本内容")
-
-
 class AnthropicUsage(BaseModel):
     """Anthropic token 使用统计"""
     input_tokens: int = Field(..., description="输入token数")
     output_tokens: int = Field(..., description="输出token数")
-
-
-class AnthropicChatResponse(BaseModel):
-    """Anthropic 聊天响应"""
-    id: str = Field(..., description="响应ID")
-    type: str = Field("message", description="类型")
-    role: str = Field("assistant", description="角色")
-    model: str = Field(..., description="模型")
-    content: List[AnthropicContentBlock] = Field(..., description="内容块")
-    stop_reason: Optional[str] = Field(None, description="停止原因")
-    stop_sequence: Optional[str] = Field(None, description="停止序列")
-    usage: AnthropicUsage = Field(..., description="使用统计")
-
-
-class AnthropicStreamEvent(BaseModel):
-    """Anthropic 流式事件"""
-    type: str = Field(..., description="事件类型")
-    index: Optional[int] = Field(None, description="索引")
-    delta: Optional[Dict[str, Any]] = Field(None, description="增量数据")
-    content_block: Optional[Dict[str, Any]] = Field(None, description="内容块")
-    message: Optional[Dict[str, Any]] = Field(None, description="消息")
-    usage: Optional[AnthropicUsage] = Field(None, description="使用统计")
 
 
 class AnthropicCountTokensRequest(BaseModel):
@@ -161,10 +133,6 @@ class AnthropicCountTokensRequest(BaseModel):
 class AnthropicCountTokensResponse(BaseModel):
     """Anthropic token 计数响应"""
     input_tokens: int = Field(..., description="输入token数")
-
-
-
-
 
 
 

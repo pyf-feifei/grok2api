@@ -1263,21 +1263,3 @@ class ToolSimulator:
         """
         remaining_text, tool_calls = self.parse_response(text, user_message)
         return self.to_anthropic_content(remaining_text, tool_calls)
-
-
-# 单例实例，用于流式处理
-_stream_simulator: Optional[ToolSimulator] = None
-
-
-def get_stream_simulator(available_tools: Optional[List[Dict[str, Any]]] = None) -> ToolSimulator:
-    """获取流式处理用的模拟器实例"""
-    global _stream_simulator
-    if _stream_simulator is None or available_tools:
-        _stream_simulator = ToolSimulator(available_tools)
-    return _stream_simulator
-
-
-def reset_stream_simulator():
-    """重置流式模拟器"""
-    global _stream_simulator
-    _stream_simulator = None
