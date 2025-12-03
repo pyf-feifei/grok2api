@@ -119,17 +119,38 @@ async def create_message(
         log_anthropic_headers(http_request)
         logger.info("[Anthropic] 收到 Anthropic 格式的聊天请求")
         
+        # 记录原始请求详情
+        request_dict = request.model_dump()
+        logger.info(f"[Anthropic] 原始请求详情:")
+        logger.info(f"[Anthropic]   - model: {request_dict.get('model')}")
+        logger.info(f"[Anthropic]   - system: {request_dict.get('system')} (类型: {type(request_dict.get('system'))})")
+        logger.info(f"[Anthropic]   - messages 数量: {len(request_dict.get('messages', []))}")
+        for idx, msg in enumerate(request_dict.get('messages', [])):
+            logger.info(f"[Anthropic]   - messages[{idx}]: role={msg.get('role')}, content类型={type(msg.get('content'))}")
+        
         # 转换 Anthropic 请求为 OpenAI 格式
-        openai_request = AnthropicConverter.to_openai_format(request.model_dump())
+        openai_request = AnthropicConverter.to_openai_format(request_dict)
+        logger.info(f"[Anthropic] 转换后的 OpenAI 格式请求:")
+        logger.info(f"[Anthropic]   - messages 数量: {len(openai_request.get('messages', []))}")
+        for idx, msg in enumerate(openai_request.get('messages', [])):
+            logger.info(f"[Anthropic]   - messages[{idx}]: role={msg.get('role')}, content类型={type(msg.get('content'))}")
         
         # 调用 Grok 客户端
         result = await GrokClient.openai_to_grok(openai_request)
+        
+        # 获取工具列表（用于工具模拟）
+        available_tools = request_dict.get("tools", [])
+        if available_tools:
+            tool_names = [t.get("name", "unknown") for t in available_tools]
+            logger.info(f"[Anthropic] 检测到 {len(available_tools)} 个可用工具: {tool_names[:20]}{'...' if len(tool_names) > 20 else ''}")
         
         # 流式响应
         if request.stream:
             # 转换流式响应为 Anthropic 格式
             async def anthropic_stream():
-                async for chunk in AnthropicConverter.to_anthropic_stream(result, request.model):
+                async for chunk in AnthropicConverter.to_anthropic_stream(
+                    result, request.model, available_tools
+                ):
                     yield chunk
             
             return StreamingResponse(
@@ -175,8 +196,10 @@ async def create_message(
                 }
             )
         
-        # 转换为 Anthropic 格式
-        anthropic_response = AnthropicConverter.to_anthropic_response(result_dict, request.model)
+        # 转换为 Anthropic 格式（传递工具列表用于工具模拟）
+        anthropic_response = AnthropicConverter.to_anthropic_response(
+            result_dict, request.model, available_tools
+        )
         return anthropic_response
         
     except GrokApiException as e:

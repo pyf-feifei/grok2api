@@ -22,12 +22,16 @@ TIMEOUT = 120
 BROWSER = "chrome133a"
 MAX_RETRY = 3
 MAX_UPLOADS = 5
+MAX_CONCURRENT_REQUESTS = 1  # 限制并发请求数为 1，防止 Grok API 的 403 限制
+REQUEST_DELAY = 0.5  # 请求之间的延迟（秒）
 
 
 class GrokClient:
     """Grok API 客户端"""
 
     _upload_sem = asyncio.Semaphore(MAX_UPLOADS)
+    _request_sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)  # 全局请求信号量
+    _last_request_time = 0.0  # 上次请求时间
 
     @staticmethod
     async def openai_to_grok(request: dict):
@@ -149,18 +153,21 @@ class GrokClient:
 
             except GrokApiException as e:
                 last_err = e
-                # 仅401/429可重试
+                # 仅 HTTP_ERROR 和 NO_AVAILABLE_TOKEN 可重试
                 if e.error_code not in ["HTTP_ERROR", "NO_AVAILABLE_TOKEN"]:
                     raise
 
                 status = e.context.get("status") if e.context else None
-                if status not in [401, 429]:
+                # 401/429/403 都可以重试（403 可能是临时的 IP 限制）
+                if status not in [401, 429, 403]:
                     raise
 
                 if i < MAX_RETRY - 1:
+                    # 403 需要更长的等待时间
+                    wait_time = 2.0 if status == 403 else 0.5
                     logger.warning(
-                        f"[Client] 失败(状态:{status}), 重试 {i+1}/{MAX_RETRY}")
-                    await asyncio.sleep(0.5)
+                        f"[Client] 失败(状态:{status}), 重试 {i+1}/{MAX_RETRY}，等待 {wait_time}s")
+                    await asyncio.sleep(wait_time)
 
         raise last_err or GrokApiException("请求失败", "REQUEST_ERROR")
 
@@ -170,20 +177,30 @@ class GrokClient:
         texts, images = [], []
         system_prompt = None
 
-        for msg in messages:
+        logger.info(f"[Client] 开始提取内容，消息数量: {len(messages)}")
+        for idx, msg in enumerate(messages):
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            logger.debug(f"[Client] 消息 [{idx}] role={role}, content类型={type(content)}, content长度={len(str(content)) if content else 0}")
 
             # 提取系统提示词（只取第一个 system 消息）
             if role == "system" and system_prompt is None:
+                logger.info(f"[Client] 发现系统消息，开始提取系统提示词")
                 if isinstance(content, str):
                     system_prompt = content
+                    logger.info(f"[Client] 系统提示词（字符串）: {system_prompt[:200] + '...' if len(system_prompt) > 200 else system_prompt}")
                 elif isinstance(content, list):
                     # 系统提示词通常只有文本，但也要处理列表格式
-                    for item in content:
+                    logger.info(f"[Client] 系统提示词是列表格式，包含 {len(content)} 项")
+                    for item_idx, item in enumerate(content):
                         if item.get("type") == "text":
                             system_prompt = item.get("text", "")
+                            logger.info(f"[Client] 从列表项 [{item_idx}] 提取系统提示词: {system_prompt[:200] + '...' if len(system_prompt) > 200 else system_prompt}")
                             break
+                    if not system_prompt:
+                        logger.warning(f"[Client] 系统消息是列表格式但未找到 text 类型的内容")
+                else:
+                    logger.warning(f"[Client] 系统消息的内容类型不支持: {type(content)}")
                 continue  # 系统消息不添加到用户消息中
 
             # 提取用户和助手消息的文本和图片
@@ -387,9 +404,23 @@ class GrokClient:
 
     @staticmethod
     async def _request(payload: dict, token: str, model: str, stream: bool, post_id: str = None):
-        """发送请求"""
+        """发送请求（带并发限制）"""
         if not token:
             raise GrokApiException("认证令牌缺失", "NO_AUTH_TOKEN")
+
+        # 使用信号量限制并发请求数
+        async with GrokClient._request_sem:
+            # 确保请求之间有足够的间隔，防止触发 Grok API 的 403 限制
+            import time
+            current_time = time.time()
+            time_since_last = current_time - GrokClient._last_request_time
+            if time_since_last < REQUEST_DELAY:
+                wait_time = REQUEST_DELAY - time_since_last
+                logger.debug(f"[Client] 等待 {wait_time:.2f}s 以避免并发限制...")
+                await asyncio.sleep(wait_time)
+            
+            GrokClient._last_request_time = time.time()
+            logger.debug(f"[Client] 获取到请求锁，开始发送请求")
 
         try:
             # 构建请求
@@ -441,6 +472,9 @@ class GrokClient:
         except curl_requests.RequestsError as e:
             logger.error(f"[Client] 网络错误: {e}")
             raise GrokApiException(f"网络错误: {e}", "NETWORK_ERROR") from e
+        except GrokApiException:
+            # 已经是 GrokApiException，直接重新抛出，保留原始 error_code
+            raise
         except Exception as e:
             logger.error(f"[Client] 请求错误: {e}")
             raise GrokApiException(f"请求错误: {e}", "REQUEST_ERROR") from e

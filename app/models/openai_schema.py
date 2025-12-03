@@ -8,10 +8,12 @@ from app.models.grok_models import Models
 
 
 class OpenAIChatRequest(BaseModel):
-    """OpenAI聊天请求"""
+    """OpenAI聊天请求（兼容 Anthropic 格式的 system 参数）"""
 
     model: str = Field(..., description="模型名称", min_length=1)
     messages: List[Dict[str, Any]] = Field(..., description="消息列表", min_length=1)
+    # 兼容 Anthropic 格式：支持独立的 system 参数（Claude Code 可能使用）
+    system: Optional[Union[str, List[Dict[str, Any]]]] = Field(None, description="系统提示词（兼容 Anthropic 格式）")
     stream: bool = Field(False, description="流式响应")
     temperature: Optional[float] = Field(0.7, ge=0, le=2, description="采样温度")
     max_tokens: Optional[int] = Field(None, ge=1, le=100000, description="最大Token数")
