@@ -26,13 +26,15 @@ from app.services.mcp import mcp
 mcp_app = mcp.http_app(stateless_http=True, transport="streamable-http")
 
 # 2. 定义应用生命周期
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     启动顺序:
     1. 初始化核心服务 (storage, settings, token_manager)
     2. 启动MCP服务生命周期
-    
+
     关闭顺序 (LIFO):
     1. 关闭MCP服务生命周期
     2. 关闭核心服务
@@ -45,7 +47,7 @@ async def lifespan(app: FastAPI):
     storage = storage_manager.get_storage()
     setting.set_storage(storage)
     token_manager.set_storage(storage)
-    
+
     # 重新加载配置和token数据
     await setting.reload()
     token_manager._load_data()
@@ -57,7 +59,7 @@ async def lifespan(app: FastAPI):
     logger.info("[MCP] MCP服务初始化完成")
 
     logger.info("[Grok2API] 应用启动成功")
-    
+
     try:
         yield
     finally:
@@ -65,7 +67,7 @@ async def lifespan(app: FastAPI):
         # 1. 退出MCP服务的生命周期
         await mcp_lifespan_context.__aexit__(None, None, None)
         logger.info("[MCP] MCP服务已关闭")
-        
+
         # 2. 关闭核心服务
         await storage_manager.close()
         logger.info("[Grok2API] 应用关闭成功")
@@ -92,12 +94,14 @@ app.include_router(images_router)
 app.include_router(gemini_router, prefix="/v1beta")  # Gemini兼容接口，路径为 /v1beta
 app.include_router(dashscope_router)  # DashScope兼容接口，路径为 /v1/services/aigc
 app.include_router(tasks_router)  # 任务查询接口，路径为 /v1/tasks
-app.include_router(anthropic_router, prefix="/v1")  # Anthropic兼容接口，路径为 /v1/messages
+# Anthropic兼容接口，路径为 /v1/messages
+app.include_router(anthropic_router, prefix="/v1")
 app.include_router(tts_router, prefix="/v1")  # TTS接口，路径为 /v1/audio/speech
 app.include_router(admin_router)
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="app/template"), name="template")
+
 
 @app.get("/")
 async def root():
@@ -120,13 +124,13 @@ async def health_check():
 async def event_logging_batch():
     """
     Claude Code 事件日志端点（静默接收）
-    
+
     Claude Code 会发送事件日志到这个端点，我们直接返回成功以避免 404 错误。
     这些日志对于代理服务没有意义，所以我们不做任何处理。
     """
     return {"status": "ok", "message": "events received"}
 
-# 挂载MCP服务器 
+# 挂载MCP服务器
 app.mount("", mcp_app)
 
 
