@@ -958,17 +958,35 @@ class ToolSimulator:
 
         return tool_calls
 
-    def _clean_grok_tool_calls(self, text: str) -> str:
-        """清理 Grok 模拟的工具调用格式，防止循环执行
+    def _clean_tool_results(self, text: str) -> str:
+        """清理 Grok 返回的工具执行结果，防止循环
         
-        移除:
-        - [Tool Call: ...]...[/Tool Call] 格式
-        - [Tool Result]...[/Tool Result] 格式
+        只移除:
+        - [Tool Result]...[/Tool Result] 格式（之前执行的结果回显）
         
-        这些是 Grok 自己模拟的，不应该被我们再次执行
+        保留:
+        - [Tool Call: ...]...[/Tool Call] 格式（这是我们要解析的）
         """
         original_len = len(text)
         
+        # 只移除 [Tool Result]...[/Tool Result] 格式
+        cleaned = re.sub(
+            r'\[Tool Result\].*?\[/Tool Result\]',
+            '',
+            text,
+            flags=re.DOTALL
+        )
+        
+        if len(cleaned) < original_len:
+            logger.debug(f"[ToolSimulator] 清理了工具结果，移除 {original_len - len(cleaned)} 字符")
+        
+        return cleaned.strip()
+
+    def _remove_tool_call_tags(self, text: str) -> str:
+        """从文本中移除已解析的 [Tool Call: ...] 格式
+        
+        在工具调用成功解析后调用，避免文本内容重复显示工具调用
+        """
         # 移除 [Tool Call: ...]...[/Tool Call] 格式
         cleaned = re.sub(
             r'\[Tool Call:\s*\w+\].*?\[/Tool Call\]',
@@ -976,17 +994,6 @@ class ToolSimulator:
             text,
             flags=re.DOTALL
         )
-        # 移除 [Tool Result]...[/Tool Result] 格式
-        cleaned = re.sub(
-            r'\[Tool Result\].*?\[/Tool Result\]',
-            '',
-            cleaned,
-            flags=re.DOTALL
-        )
-        
-        if len(cleaned) < original_len:
-            logger.warning(f"[ToolSimulator] 清理了 Grok 模拟调用，移除 {original_len - len(cleaned)} 字符")
-        
         return cleaned.strip()
 
     def parse_response(self, text: str, user_message: str = '') -> Tuple[str, List[ToolCall]]:
@@ -1001,19 +1008,17 @@ class ToolSimulator:
         """
         tool_calls = []
         
-        # !! 关键：首先清理 Grok 模拟的工具调用格式，防止死循环 !!
-        # Grok 有时会返回 [Tool Call: ...]...[/Tool Call] 和 [Tool Result]...[/Tool Result]
-        # 这些是它自己模拟的响应，如果我们再次解析执行，会导致无限循环
-        remaining_text = self._clean_grok_tool_calls(text)
+        # 清理之前的工具执行结果（防止循环），但保留 [Tool Call: ...] 格式
+        remaining_text = self._clean_tool_results(text)
 
         # 检查是否有可用的工具
         if not self.available_tools:
             logger.debug("[ToolSimulator] 没有可用工具，跳过工具模拟")
             return remaining_text, []
 
-        # 0. 禁用 Grok 模拟工具调用格式的解析（已在上面清理）
-        # 原因：Grok 返回的 [Tool Call] 格式往往是示例或循环内容
-        grok_tool_calls = []  # 完全禁用这个功能
+        # 0. 优先解析 Grok 的 [Tool Call: ...] 格式（通过系统提示词规范化的格式）
+        # 这是最可靠的方式，因为格式是明确的
+        grok_tool_calls = self._parse_grok_tool_calls(remaining_text)
         if grok_tool_calls:
             logger.info(
                 f"[ToolSimulator] 从 Grok 格式提取到 {len(grok_tool_calls)} 个工具调用")
@@ -1071,7 +1076,9 @@ class ToolSimulator:
 
             if valid_calls:
                 logger.info(f"[ToolSimulator] 有效工具调用数: {len(valid_calls)}")
-                return remaining_text, valid_calls
+                # 从文本中移除已解析的 [Tool Call] 格式，避免重复
+                cleaned_text = self._remove_tool_call_tags(remaining_text)
+                return cleaned_text, valid_calls
             # 如果所有调用都被过滤了，继续尝试从代码块提取
 
         # 1. 提取代码块（使用清理后的文本）
@@ -1137,42 +1144,15 @@ class ToolSimulator:
                 logger.info(
                     f"[ToolSimulator] 创建 Grep 工具调用: {pattern} in {path}")
 
-        # 6. 检测 Glob 文件匹配意图（禁用 - 容易误匹配）
-        # 原因：从文本中检测 *.py 等模式容易出错
-        # 只有在 shell 代码块中明确出现 ls *.py 或 find -name 时才可靠
-        # if self.has_tool('Glob'):
-        #     glob_pattern = self.detect_glob_intent(remaining_text, code_blocks)
-        #     if glob_pattern:
-        #         glob_call = self.create_glob_tool_call(glob_pattern)
-        #         tool_calls.append(glob_call)
-        #         logger.info(f"[ToolSimulator] 创建 Glob 工具调用: {glob_pattern}")
-
-        # 7-8. WebSearch 和 WebFetch（禁用 - 容易误匹配）
-        # 原因：从文本中检测搜索和 URL 获取意图容易出错
-        # if self.has_tool('WebSearch'):
-        #     search_query = self.detect_websearch_intent(remaining_text)
-        #     if search_query:
-        #         search_call = self.create_websearch_tool_call(search_query)
-        #         tool_calls.append(search_call)
-        #         logger.info(f"[ToolSimulator] 创建 WebSearch 工具调用: {search_query}")
-        # if self.has_tool('WebFetch'):
-        #     fetch_url = self.detect_webfetch_intent(remaining_text)
-        #     if fetch_url:
-        #         fetch_call = self.create_webfetch_tool_call(fetch_url)
-        #         tool_calls.append(fetch_call)
-        #         logger.info(f"[ToolSimulator] 创建 WebFetch 工具调用: {fetch_url}")
-
-        # 9. 检测 TodoWrite 待办事项意图（完全禁用）
-        # 原因：从 Grok 的纯文本响应中检测 TODO 极易误匹配
-        # 用户提到的内容（如"ID，我直接打包发网盘"）会被错误识别为 TODO
-        # if self.has_tool('TodoWrite'):
-        #     todos = self.detect_todo_intent(remaining_text)
-        #     valid_todos = [t for t in todos if len(t) >= 5 and len(t) <= 200]
-        #     if valid_todos:
-        #         for todo in valid_todos[:5]:
-        #             todo_call = self.create_todowrite_tool_call(todo)
-        #             tool_calls.append(todo_call)
-        #             logger.info(f"[ToolSimulator] 创建 TodoWrite 工具调用: {todo[:30]}...")
+        # 6-9. 以下工具的自动检测已禁用（从纯文本猜测容易误匹配）
+        # 这些工具现在依赖 Grok 使用 [Tool Call: ...] 格式明确调用
+        # 通过系统提示词注入，Grok 会知道如何使用正确格式
+        # - Glob: 文件匹配
+        # - WebSearch: 网络搜索
+        # - WebFetch: 获取网页
+        # - TodoWrite: 待办事项
+        # 如果 Grok 返回了 [Tool Call: Glob/WebSearch/WebFetch/TodoWrite]，
+        # 会在上面的 _parse_grok_tool_calls 中被正确解析
 
         # 10. 检测 KillShell 终止进程意图
         if self.has_tool('KillShell'):

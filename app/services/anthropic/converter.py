@@ -12,6 +12,70 @@ from app.services.anthropic.tool_simulator import ToolSimulator
 class AnthropicConverter:
     """Anthropic 和 OpenAI 格式转换器"""
 
+    # 工具调用格式说明（注入到系统提示词）
+    TOOL_FORMAT_INSTRUCTION = """
+
+## 工具调用格式
+
+当你需要执行文件操作、命令执行等操作时，请严格使用以下格式：
+
+### 写入文件 (Write)
+```
+[Tool Call: Write]
+{"file_path": "完整的文件路径", "content": "文件的完整内容"}
+[/Tool Call]
+```
+
+### 读取文件 (Read)
+```
+[Tool Call: Read]
+{"file_path": "要读取的文件路径"}
+[/Tool Call]
+```
+
+### 编辑文件 (Edit)
+```
+[Tool Call: Edit]
+{"file_path": "文件路径", "old_string": "要替换的原文本", "new_string": "替换后的新文本"}
+[/Tool Call]
+```
+
+### 执行命令 (Bash)
+```
+[Tool Call: Bash]
+{"command": "要执行的shell命令"}
+[/Tool Call]
+```
+
+### 搜索文件内容 (Grep)
+```
+[Tool Call: Grep]
+{"pattern": "搜索模式", "path": "搜索路径，默认为."}
+[/Tool Call]
+```
+
+### 列出文件 (Glob)
+```
+[Tool Call: Glob]
+{"pattern": "文件匹配模式，如 **/*.py"}
+[/Tool Call]
+```
+
+### 添加待办 (TodoWrite)
+```
+[Tool Call: TodoWrite]
+{"todos": [{"id": "唯一ID", "content": "待办内容", "status": "pending"}]}
+[/Tool Call]
+```
+
+**重要规则：**
+1. 只有在确实需要执行操作时才使用工具调用格式
+2. JSON 必须是有效格式，字符串内容需要正确转义
+3. 普通对话、解释、回答问题时不要使用工具调用格式
+4. 每个工具调用必须包含完整的 [Tool Call: 工具名] 和 [/Tool Call] 标记
+5. content 字段中的代码内容要完整，不要省略
+"""
+
     @staticmethod
     def _extract_system_content(system: Any) -> str:
         """从 system 字段提取文本内容（支持字符串和数组格式）"""
@@ -46,24 +110,39 @@ class AnthropicConverter:
         # 构建 OpenAI 格式的消息列表
         openai_messages = []
 
+        # 检查是否有工具列表（需要注入工具格式说明）
+        tools = anthropic_request.get("tools", [])
+        has_tools = bool(tools)
+        if has_tools:
+            tool_names = [t.get("name", "unknown") for t in tools]
+            logger.info(
+                f"[Anthropic] 检测到 {len(tools)} 个工具，将注入格式说明: {tool_names[:10]}...")
+
         # 添加系统消息（如果有）- 支持字符串和数组格式
         system = anthropic_request.get("system")
         logger.info(
             f"[Anthropic] 原始请求中的 system 字段: {system} (类型: {type(system)})")
+
+        system_content = ""
         if system:
             system_content = AnthropicConverter._extract_system_content(system)
             logger.info(
                 f"[Anthropic] 提取的系统提示词内容: {system_content[:200] + '...' if system_content and len(system_content) > 200 else system_content}")
-            if system_content:
-                openai_messages.append({
-                    "role": "system",
-                    "content": system_content
-                })
-                logger.info(f"[Anthropic] 已添加系统消息到 OpenAI 格式")
-            else:
-                logger.warning(f"[Anthropic] 系统字段存在但提取的内容为空")
+
+        # 如果有工具，注入工具格式说明到系统提示词
+        if has_tools:
+            system_content = (system_content or "") + \
+                AnthropicConverter.TOOL_FORMAT_INSTRUCTION
+            logger.info(f"[Anthropic] 已注入工具格式说明到系统提示词")
+
+        if system_content:
+            openai_messages.append({
+                "role": "system",
+                "content": system_content
+            })
+            logger.info(f"[Anthropic] 已添加系统消息到 OpenAI 格式")
         else:
-            logger.info(f"[Anthropic] 请求中没有 system 字段")
+            logger.info(f"[Anthropic] 请求中没有 system 字段且无工具")
 
         # 转换消息
         for msg in anthropic_request.get("messages", []):
@@ -256,12 +335,18 @@ class AnthropicConverter:
             openai_stream: OpenAI 流式响应
             model: 模型名称
             available_tools: 可用工具列表（用于工具模拟）
+
+        处理策略：
+        - 如果有工具可用，先缓冲所有内容，最后统一处理（避免发送原始 [Tool Call] 文本）
+        - 如果没有工具，正常流式发送文本
         """
+        import re
 
         message_id = f"msg_{uuid.uuid4().hex}"
-        created_time = int(time.time())
         content_index = 0
         total_text = ""
+        has_tools = bool(available_tools)
+        text_sent = False  # 是否已发送文本块
 
         try:
             # 发送 message_start 事件
@@ -283,16 +368,18 @@ class AnthropicConverter:
             }
             yield f"event: message_start\ndata: {orjson.dumps(start_event).decode()}\n\n".encode()
 
-            # 发送 content_block_start 事件
-            content_start_event = {
-                "type": "content_block_start",
-                "index": content_index,
-                "content_block": {
-                    "type": "text",
-                    "text": ""
+            # 如果没有工具，发送 content_block_start（流式模式）
+            if not has_tools:
+                content_start_event = {
+                    "type": "content_block_start",
+                    "index": content_index,
+                    "content_block": {
+                        "type": "text",
+                        "text": ""
+                    }
                 }
-            }
-            yield f"event: content_block_start\ndata: {orjson.dumps(content_start_event).decode()}\n\n".encode()
+                yield f"event: content_block_start\ndata: {orjson.dumps(content_start_event).decode()}\n\n".encode()
+                text_sent = True
 
             # 处理流式数据
             async for chunk in openai_stream:
@@ -322,79 +409,118 @@ class AnthropicConverter:
                             if content:
                                 total_text += content
 
-                                # 发送 content_block_delta 事件
-                                delta_event = {
-                                    "type": "content_block_delta",
-                                    "index": content_index,
-                                    "delta": {
-                                        "type": "text_delta",
-                                        "text": content
+                                # 只有在没有工具时才流式发送文本
+                                if not has_tools:
+                                    delta_event = {
+                                        "type": "content_block_delta",
+                                        "index": content_index,
+                                        "delta": {
+                                            "type": "text_delta",
+                                            "text": content
+                                        }
                                     }
-                                }
-                                yield f"event: content_block_delta\ndata: {orjson.dumps(delta_event).decode()}\n\n".encode()
+                                    yield f"event: content_block_delta\ndata: {orjson.dumps(delta_event).decode()}\n\n".encode()
 
                     except Exception as e:
                         logger.warning(f"[Anthropic] 解析流式数据失败: {e}")
                         continue
 
-            # 发送 content_block_stop 事件（文本块结束）
-            content_stop_event = {
-                "type": "content_block_stop",
-                "index": content_index
-            }
-            yield f"event: content_block_stop\ndata: {orjson.dumps(content_stop_event).decode()}\n\n".encode()
-
-            # 工具模拟：检测代码块并生成工具调用
+            # 流结束后处理
             tool_calls = []
             stop_reason = "end_turn"
+            cleaned_text = total_text
 
-            if available_tools and total_text:
+            # 如果有工具，解析并处理
+            if has_tools and total_text:
                 try:
                     simulator = ToolSimulator(available_tools)
-                    _, tool_calls = simulator.parse_response(total_text)
+                    cleaned_text, tool_calls = simulator.parse_response(
+                        total_text)
 
                     if tool_calls:
                         stop_reason = "tool_use"
                         logger.info(
                             f"[Anthropic] 流式工具模拟: 生成了 {len(tool_calls)} 个工具调用")
 
-                        # 为每个工具调用发送事件
-                        for tc in tool_calls:
-                            content_index += 1
-
-                            # 发送 content_block_start 事件（tool_use）
-                            tool_start_event = {
-                                "type": "content_block_start",
-                                "index": content_index,
-                                "content_block": {
-                                    "type": "tool_use",
-                                    "id": tc.id,
-                                    "name": tc.name,
-                                    "input": {}
-                                }
-                            }
-                            yield f"event: content_block_start\ndata: {orjson.dumps(tool_start_event).decode()}\n\n".encode()
-
-                            # 发送 content_block_delta 事件（tool_use input）
-                            tool_delta_event = {
-                                "type": "content_block_delta",
-                                "index": content_index,
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": orjson.dumps(tc.input).decode()
-                                }
-                            }
-                            yield f"event: content_block_delta\ndata: {orjson.dumps(tool_delta_event).decode()}\n\n".encode()
-
-                            # 发送 content_block_stop 事件
-                            tool_stop_event = {
-                                "type": "content_block_stop",
-                                "index": content_index
-                            }
-                            yield f"event: content_block_stop\ndata: {orjson.dumps(tool_stop_event).decode()}\n\n".encode()
-
                 except Exception as e:
                     logger.warning(f"[Anthropic] 流式工具模拟失败: {e}")
+                    cleaned_text = total_text
+
+                # 发送清理后的文本块（如果有内容）
+                if cleaned_text.strip():
+                    # 发送 content_block_start
+                    content_start_event = {
+                        "type": "content_block_start",
+                        "index": content_index,
+                        "content_block": {
+                            "type": "text",
+                            "text": ""
+                        }
+                    }
+                    yield f"event: content_block_start\ndata: {orjson.dumps(content_start_event).decode()}\n\n".encode()
+
+                    # 发送文本内容
+                    delta_event = {
+                        "type": "content_block_delta",
+                        "index": content_index,
+                        "delta": {
+                            "type": "text_delta",
+                            "text": cleaned_text
+                        }
+                    }
+                    yield f"event: content_block_delta\ndata: {orjson.dumps(delta_event).decode()}\n\n".encode()
+
+                    # 发送 content_block_stop
+                    content_stop_event = {
+                        "type": "content_block_stop",
+                        "index": content_index
+                    }
+                    yield f"event: content_block_stop\ndata: {orjson.dumps(content_stop_event).decode()}\n\n".encode()
+                    text_sent = True
+
+                # 发送工具调用块
+                for tc in tool_calls:
+                    content_index += 1
+
+                    # 发送 content_block_start 事件（tool_use）
+                    tool_start_event = {
+                        "type": "content_block_start",
+                        "index": content_index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": {}
+                        }
+                    }
+                    yield f"event: content_block_start\ndata: {orjson.dumps(tool_start_event).decode()}\n\n".encode()
+
+                    # 发送 content_block_delta 事件（tool_use input）
+                    tool_delta_event = {
+                        "type": "content_block_delta",
+                        "index": content_index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": orjson.dumps(tc.input).decode()
+                        }
+                    }
+                    yield f"event: content_block_delta\ndata: {orjson.dumps(tool_delta_event).decode()}\n\n".encode()
+
+                    # 发送 content_block_stop 事件
+                    tool_stop_event = {
+                        "type": "content_block_stop",
+                        "index": content_index
+                    }
+                    yield f"event: content_block_stop\ndata: {orjson.dumps(tool_stop_event).decode()}\n\n".encode()
+
+            else:
+                # 没有工具时，发送 content_block_stop
+                if text_sent:
+                    content_stop_event = {
+                        "type": "content_block_stop",
+                        "index": content_index
+                    }
+                    yield f"event: content_block_stop\ndata: {orjson.dumps(content_stop_event).decode()}\n\n".encode()
 
             # 发送 message_delta 事件
             delta_event = {
@@ -416,7 +542,7 @@ class AnthropicConverter:
             yield f"event: message_stop\ndata: {orjson.dumps(stop_event).decode()}\n\n".encode()
 
             logger.info(
-                f"[Anthropic] 流式响应完成: {len(total_text)} 字符, {len(tool_calls)} 个工具调用")
+                f"[Anthropic] 流式响应完成: {len(total_text)} 字符 -> {len(cleaned_text)} 字符, {len(tool_calls)} 个工具调用")
 
         except Exception as e:
             logger.error(f"[Anthropic] 流式转换错误: {e}")
