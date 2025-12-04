@@ -115,6 +115,17 @@ async def health_check():
         "version": "1.0.3"
     }
 
+
+@app.post("/api/event_logging/batch")
+async def event_logging_batch():
+    """
+    Claude Code 事件日志端点（静默接收）
+    
+    Claude Code 会发送事件日志到这个端点，我们直接返回成功以避免 404 错误。
+    这些日志对于代理服务没有意义，所以我们不做任何处理。
+    """
+    return {"status": "ok", "message": "events received"}
+
 # 挂载MCP服务器 
 app.mount("", mcp_app)
 

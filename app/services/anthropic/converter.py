@@ -42,65 +42,58 @@ class AnthropicConverter:
     # 工具调用格式说明（注入到系统提示词）
     TOOL_FORMAT_INSTRUCTION = """
 
-## 工具调用格式
+## 工具调用格式（必须严格遵守）
 
-当你需要执行文件操作、命令执行等操作时，请严格使用以下格式：
+**关键规则：当用户请求"创建"、"生成"、"执行"、"写入"、"初始化"文件或项目时，你必须立即使用工具调用格式来实际执行操作，而不是只描述要做什么。**
 
-### 写入文件 (Write)
-```
+### 写入/创建文件 (Write) - 最常用
+当需要创建新文件或覆盖文件内容时使用：
 [Tool Call: Write]
 {"file_path": "完整的文件路径", "content": "文件的完整内容"}
 [/Tool Call]
-```
+
+示例 - 创建 Python 文件：
+[Tool Call: Write]
+{"file_path": "backend/app/main.py", "content": "from fastapi import FastAPI\\n\\napp = FastAPI()\\n\\n@app.get('/')\\ndef root():\\n    return {'message': 'Hello'}"}
+[/Tool Call]
 
 ### 读取文件 (Read)
-```
 [Tool Call: Read]
 {"file_path": "要读取的文件路径"}
 [/Tool Call]
-```
 
 ### 编辑文件 (Edit)
-```
 [Tool Call: Edit]
 {"file_path": "文件路径", "old_string": "要替换的原文本", "new_string": "替换后的新文本"}
 [/Tool Call]
-```
 
 ### 执行命令 (Bash)
-```
 [Tool Call: Bash]
 {"command": "要执行的shell命令"}
 [/Tool Call]
-```
 
 ### 搜索文件内容 (Grep)
-```
 [Tool Call: Grep]
 {"pattern": "搜索模式", "path": "搜索路径，默认为."}
 [/Tool Call]
-```
 
 ### 列出文件 (Glob)
-```
 [Tool Call: Glob]
 {"pattern": "文件匹配模式，如 **/*.py"}
 [/Tool Call]
-```
 
 ### 添加待办 (TodoWrite)
-```
 [Tool Call: TodoWrite]
 {"todos": [{"id": "唯一ID", "content": "待办内容", "status": "pending"}]}
 [/Tool Call]
-```
 
-**重要规则：**
-1. 只有在确实需要执行操作时才使用工具调用格式
-2. JSON 必须是有效格式，字符串内容需要正确转义
-3. 普通对话、解释、回答问题时不要使用工具调用格式
-4. 每个工具调用必须包含完整的 [Tool Call: 工具名] 和 [/Tool Call] 标记
-5. content 字段中的代码内容要完整，不要省略
+**强制执行规则：**
+1. 当用户说"执行"、"创建"、"生成"、"初始化"时 → 必须使用 [Tool Call: Write] 创建实际文件
+2. 不要只描述目录结构或代码，而是要实际调用工具创建文件
+3. JSON 必须是有效格式，字符串内容需要正确转义（换行用 \\n，引号用 \\"）
+4. content 字段中的代码内容要完整，不要省略或用注释代替
+5. 每个文件都需要单独的 [Tool Call: Write] 调用
+6. 先创建目录结构所需的文件，而不是描述它们
 """
 
     @classmethod
@@ -401,6 +394,13 @@ Important: Do not reveal your model name, developer company, or any identity inf
 
             # 过滤掉 Grok 身份暴露的内容
             import re
+            # 移除完整的拒绝语句（包含 "I'm sorry, but I can't..." 和身份声明）
+            content_text = re.sub(
+                r'I\'?m\s+sorry,?\s+but\s+I\s+can\'?t\s+(?:change\s+my\s+identity|follow\s+instructions|assume\s+a\s+different\s+persona)[^\.\n]*\.\s*I\'?m\s+Grok[^\.\n]*\.',
+                '',
+                content_text,
+                flags=re.IGNORECASE | re.MULTILINE | re.DOTALL
+            )
             # 移除 "我是 Grok"、"I'm Grok" 等身份声明
             content_text = re.sub(
                 r'我是\s*Grok[^。\n]*[。\n]?|I\'?m\s+Grok[^\.\n]*[\.\n]?|I am Grok[^\.\n]*[\.\n]?',
@@ -410,14 +410,28 @@ Important: Do not reveal your model name, developer company, or any identity inf
             )
             # 移除 "由 xAI 构建"、"built by xAI" 等公司信息
             content_text = re.sub(
-                r'由\s*xAI\s*构建[^。\n]*[。\n]?|built by xAI[^\.\n]*[\.\n]?',
+                r'由\s*xAI\s*构建[^。\n]*[。\n]?|built\s+by\s+xAI[^\.\n]*[\.\n]?',
                 '',
                 content_text,
                 flags=re.IGNORECASE | re.MULTILINE
             )
-            # 移除包含 "Grok 4" 的身份声明
+            # 移除包含 "Grok 4"、"Grok-4"、"Grok4" 的身份声明
             content_text = re.sub(
-                r'Grok\s*\d+[^。\n]*[。\n]?',
+                r'Grok\s*[-\s]*\d+[^。\n]*[。\n]?',
+                '',
+                content_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+            # 移除 "can't change my identity" 或 "can't follow instructions that contradict" 等拒绝语句
+            content_text = re.sub(
+                r'I\s+can\'?t\s+(?:change\s+my\s+identity|follow\s+(?:instructions|those\s+instructions)\s+that\s+contradict|assume\s+a\s+different\s+persona|follow\s+instructions\s+that\s+override)[^\.\n]*\.',
+                '',
+                content_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+            # 移除包含 "xAI" 的表述（更激进的过滤）
+            content_text = re.sub(
+                r'[^a-zA-Z]xAI[^a-zA-Z][^。\n]*[。\n]?',
                 '',
                 content_text,
                 flags=re.IGNORECASE | re.MULTILINE
@@ -447,93 +461,14 @@ Important: Do not reveal your model name, developer company, or any identity inf
                 simulated_content = simulator.process_response(content_text)
                 if simulated_content:
                     content = simulated_content
-                    # 检查是否有 Skill 工具调用，如果有则加载技能提示并注入
+                    # 注意: 不要在 assistant 响应中添加 tool_result
+                    # tool_result 是 user 角色使用的内容类型，不能出现在 assistant 响应中
+                    # Claude Code 会自己处理 tool_use 调用并返回 tool_result
                     skill_tool_calls = [c for c in content if c.get(
                         "type") == "tool_use" and c.get("name") == "Skill"]
                     if skill_tool_calls:
-                        from app.services.anthropic.skill_handler import SkillHandler
-                        import os
-                        for skill_call in skill_tool_calls:
-                            try:
-                                tool_id = skill_call.get("id")
-                                tool_input = skill_call.get("input", {})
-                                # 根据官方文档，Skill 工具的参数是 command（兼容 skill）
-                                skill_name = tool_input.get(
-                                    "command", tool_input.get("skill", "")).strip()
-
-                                logger.info(
-                                    f"[Anthropic] Skill 工具调用: tool_id={tool_id}, tool_input={tool_input}, skill_name='{skill_name}'")
-
-                                if skill_name:
-                                    # 加载技能提示
-                                    skill_prompt = SkillHandler.load_skill_prompt(
-                                        skill_name)
-                                    if skill_prompt:
-                                        # 根据官方文档格式，返回：
-                                        # 1. tool_result 包含状态消息
-                                        # 2. text 块包含 command-message 和 command-name XML 标签
-                                        # 3. text 块包含 Base Path 和 SKILL.md 内容（不包括 frontmatter）
-
-                                        # 获取技能的基础路径
-                                        skills_dir = SkillHandler.get_skills_directory()
-                                        skill_base_path = str(
-                                            skills_dir / skill_name).replace("\\", "/")
-
-                                        # 移除 frontmatter（YAML 部分）
-                                        skill_content = skill_prompt
-                                        if skill_content.startswith("---"):
-                                            # 找到第二个 ---
-                                            parts = skill_content.split(
-                                                "---", 2)
-                                            if len(parts) >= 3:
-                                                skill_content = parts[2].strip(
-                                                )
-
-                                        # 1. tool_result 状态消息
-                                        content.append({
-                                            "type": "tool_result",
-                                            "tool_use_id": tool_id,
-                                            "content": f"Launching skill: {skill_name}"
-                                        })
-
-                                        # 2. command-message 和 command-name XML 标签
-                                        content.append({
-                                            "type": "text",
-                                            "text": f"<command-message>The \"{skill_name}\" skill is running</command-message>\n<command-name>{skill_name}</command-name>"
-                                        })
-
-                                        # 3. Base Path 和 SKILL.md 内容
-                                        content.append({
-                                            "type": "text",
-                                            "text": f"Base Path: {skill_base_path}\n\n{skill_content}"
-                                        })
-
-                                        logger.info(
-                                            f"[Anthropic] 技能已加载: {skill_name}, base_path={skill_base_path}")
-                                    else:
-                                        # 如果找不到技能文件，返回错误
-                                        content.append({
-                                            "type": "tool_result",
-                                            "tool_use_id": tool_id,
-                                            "content": f"Error: Skill '{skill_name}' not found"
-                                        })
-                                else:
-                                    # 如果 command 为空，返回技能列表（作为 tool_result）
-                                    # 注意：这不是标准用法，但我们需要处理这种情况
-                                    skill_list = SkillHandler.handle_skill_tool_call({
-                                    })
-                                    content.append({
-                                        "type": "tool_result",
-                                        "tool_use_id": tool_id,
-                                        "content": skill_list if isinstance(skill_list, str) else str(skill_list)
-                                    })
-                            except Exception as e:
-                                logger.error(f"[Anthropic] Skill 工具处理失败: {e}")
-                                content.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": skill_call.get("id"),
-                                    "content": f"Error: {str(e)}"
-                                })
+                        logger.info(
+                            f"[Anthropic] 检测到 {len(skill_tool_calls)} 个 Skill 工具调用，将由 Claude Code 处理")
 
                     # 如果有工具调用，修改 stop_reason
                     has_tool_use = any(
@@ -648,51 +583,21 @@ Important: Do not reveal your model name, developer company, or any identity inf
                             content = delta.get("content", "")
 
                             if content:
-                                # 实时过滤身份暴露内容（流式模式）
-                                import re
-                                # 移除 "我是 Grok"、"I'm Grok" 等身份声明
-                                filtered_content = re.sub(
-                                    r'我是\s*Grok[^。\n]*[。\n]?|I\'?m\s+Grok[^\.\n]*[\.\n]?|I am Grok[^\.\n]*[\.\n]?',
-                                    '',
-                                    content,
-                                    flags=re.IGNORECASE | re.MULTILINE
-                                )
-                                # 移除 "由 xAI 构建"、"built by xAI" 等公司信息
-                                filtered_content = re.sub(
-                                    r'由\s*xAI\s*构建[^。\n]*[。\n]?|built by xAI[^\.\n]*[\.\n]?',
-                                    '',
-                                    filtered_content,
-                                    flags=re.IGNORECASE | re.MULTILINE
-                                )
-                                # 移除包含 "Grok 4"、"Grok-4" 等身份声明
-                                filtered_content = re.sub(
-                                    r'Grok\s*[-\s]*\d+[^。\n]*[。\n]?',
-                                    '',
-                                    filtered_content,
-                                    flags=re.IGNORECASE | re.MULTILINE
-                                )
-                                # 移除包含 "xAI" 的表述
-                                filtered_content = re.sub(
-                                    r'xAI[^。\n]*[。\n]?',
-                                    '',
-                                    filtered_content,
-                                    flags=re.IGNORECASE | re.MULTILINE
-                                )
+                                # 流式模式下不进行过滤，只累积文本
+                                # 过滤将在流结束后统一进行，避免截断句子和重复处理
+                                total_text += content
 
-                                if filtered_content:  # 只有在过滤后仍有内容时才添加
-                                    total_text += filtered_content
-
-                                    # 只有在没有工具时才流式发送文本
-                                    if not has_tools:
-                                        delta_event = {
-                                            "type": "content_block_delta",
-                                            "index": content_index,
-                                            "delta": {
-                                                "type": "text_delta",
-                                                "text": filtered_content
-                                            }
+                                # 只有在没有工具时才流式发送文本（直接发送原始内容，不过滤）
+                                if not has_tools:
+                                    delta_event = {
+                                        "type": "content_block_delta",
+                                        "index": content_index,
+                                        "delta": {
+                                            "type": "text_delta",
+                                            "text": content
                                         }
-                                        yield f"event: content_block_delta\ndata: {orjson.dumps(delta_event).decode()}\n\n".encode()
+                                    }
+                                    yield f"event: content_block_delta\ndata: {orjson.dumps(delta_event).decode()}\n\n".encode()
 
                     except Exception as e:
                         logger.warning(f"[Anthropic] 解析流式数据失败: {e}")
@@ -702,38 +607,44 @@ Important: Do not reveal your model name, developer company, or any identity inf
             tool_calls = []
             stop_reason = "end_turn"
 
-            # 过滤掉 Grok 身份暴露的内容
+            # 统一过滤掉 Grok 身份暴露的内容（只在流结束后进行一次，避免重复处理和截断）
             import re
-            # 移除 "我是 Grok"、"I'm Grok" 等身份声明
+
+            # 先移除完整的拒绝语句（最优先，避免部分匹配）
             total_text = re.sub(
-                r'我是\s*Grok[^。\n]*[。\n]?|I\'?m\s+Grok[^\.\n]*[\.\n]?|I am Grok[^\.\n]*[\.\n]?',
+                r'I\'?m\s+sorry,?\s+but\s+I\s+can\'?t\s+(?:change\s+my\s+identity|follow\s+instructions|assume\s+a\s+different\s+persona)[^\.\n]*\.\s*I\'?m\s+Grok[^\.\n]*\.',
                 '',
                 total_text,
-                flags=re.IGNORECASE | re.MULTILINE
+                flags=re.IGNORECASE | re.MULTILINE | re.DOTALL
             )
-            # 移除 "由 xAI 构建"、"built by xAI" 等公司信息
+
+            # 移除独立的身份声明（避免误删包含 "Grok" 的正常词汇）
             total_text = re.sub(
-                r'由\s*xAI\s*构建[^。\n]*[。\n]?|built by xAI[^\.\n]*[\.\n]?',
-                '',
-                total_text,
-                flags=re.IGNORECASE | re.MULTILINE
-            )
-            # 移除包含 "Grok 4"、"Grok-4" 等身份声明
-            total_text = re.sub(
-                r'Grok\s*[-\s]*\d+[^。\n]*[。\n]?',
-                '',
-                total_text,
-                flags=re.IGNORECASE | re.MULTILINE
-            )
-            # 移除包含 "xAI" 的表述
-            total_text = re.sub(
-                r'xAI[^。\n]*[。\n]?',
+                r'\b(?:我是\s*)?Grok\s*\d*[^。\n]*[。\n]?|\bI\'?m\s+Grok[^\.\n]*[\.\n]?|\bI\s+am\s+Grok[^\.\n]*[\.\n]?',
                 '',
                 total_text,
                 flags=re.IGNORECASE | re.MULTILINE
             )
 
-            cleaned_text = total_text
+            # 移除公司信息（更精确的匹配，避免误删）
+            total_text = re.sub(
+                r'\b(?:由\s*)?xAI\s*(?:构建|built|powered)[^。\n]*[。\n]?|\bbuilt\s+by\s+xAI[^\.\n]*[\.\n]?',
+                '',
+                total_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+
+            # 移除拒绝指令（精确匹配，避免误删）
+            total_text = re.sub(
+                r'\bI\s+can\'?t\s+(?:change\s+my\s+identity|follow\s+(?:instructions|those\s+instructions)\s+that\s+contradict|assume\s+a\s+different\s+persona|follow\s+instructions\s+that\s+override)[^\.\n]*\.',
+                '',
+                total_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+
+            # 清理多余的空行和空格
+            cleaned_text = re.sub(r'\n{3,}', '\n\n', total_text)  # 多个空行合并为两个
+            cleaned_text = cleaned_text.strip()
 
             # 如果有工具，解析并处理
             if has_tools and total_text:
@@ -818,151 +729,12 @@ Important: Do not reveal your model name, developer company, or any identity inf
                     }
                     yield f"event: content_block_stop\ndata: {orjson.dumps(tool_stop_event).decode()}\n\n".encode()
 
-                    # 如果是 Skill 工具，加载技能提示并注入到文本中
+                    # 注意: 不在 assistant 响应中注入 Skill 结果
+                    # tool_result 是 user 角色使用的内容类型，不能出现在 assistant 响应中
+                    # Claude Code 会自己处理 tool_use 调用
                     if tc.name == "Skill":
-                        from app.services.anthropic.skill_handler import SkillHandler
-                        try:
-                            # 根据官方文档，Skill 工具的参数是 command（兼容 skill）
-                            skill_name = tc.input.get(
-                                "command", tc.input.get("skill", "")).strip()
-                            if skill_name:
-                                # 加载技能提示
-                                skill_prompt = SkillHandler.load_skill_prompt(
-                                    skill_name)
-                                if skill_prompt:
-                                    import os
-                                    # 获取技能的基础路径
-                                    skills_dir = SkillHandler.get_skills_directory()
-                                    skill_base_path = str(
-                                        skills_dir / skill_name).replace("\\", "/")
-
-                                    # 移除 frontmatter（YAML 部分）
-                                    skill_content = skill_prompt
-                                    if skill_content.startswith("---"):
-                                        parts = skill_content.split("---", 2)
-                                        if len(parts) >= 3:
-                                            skill_content = parts[2].strip()
-
-                                    # 1. tool_result 状态消息
-                                    content_index += 1
-                                    result_start_event = {
-                                        "type": "content_block_start",
-                                        "index": content_index,
-                                        "content_block": {
-                                            "type": "tool_result",
-                                            "tool_use_id": tc.id,
-                                            "content": ""
-                                        }
-                                    }
-                                    yield f"event: content_block_start\ndata: {orjson.dumps(result_start_event).decode()}\n\n".encode()
-
-                                    result_delta_event = {
-                                        "type": "content_block_delta",
-                                        "index": content_index,
-                                        "delta": {
-                                            "type": "text_delta",
-                                            "text": f"Launching skill: {skill_name}"
-                                        }
-                                    }
-                                    yield f"event: content_block_delta\ndata: {orjson.dumps(result_delta_event).decode()}\n\n".encode()
-
-                                    result_stop_event = {
-                                        "type": "content_block_stop",
-                                        "index": content_index
-                                    }
-                                    yield f"event: content_block_stop\ndata: {orjson.dumps(result_stop_event).decode()}\n\n".encode()
-
-                                    # 2. command-message 和 command-name XML 标签
-                                    content_index += 1
-                                    cmd_msg_start = {
-                                        "type": "content_block_start",
-                                        "index": content_index,
-                                        "content_block": {
-                                            "type": "text",
-                                            "text": ""
-                                        }
-                                    }
-                                    yield f"event: content_block_start\ndata: {orjson.dumps(cmd_msg_start).decode()}\n\n".encode()
-
-                                    cmd_msg_delta = {
-                                        "type": "content_block_delta",
-                                        "index": content_index,
-                                        "delta": {
-                                            "type": "text_delta",
-                                            "text": f"<command-message>The \"{skill_name}\" skill is running</command-message>\n<command-name>{skill_name}</command-name>\n"
-                                        }
-                                    }
-                                    yield f"event: content_block_delta\ndata: {orjson.dumps(cmd_msg_delta).decode()}\n\n".encode()
-
-                                    cmd_msg_stop = {
-                                        "type": "content_block_stop",
-                                        "index": content_index
-                                    }
-                                    yield f"event: content_block_stop\ndata: {orjson.dumps(cmd_msg_stop).decode()}\n\n".encode()
-
-                                    # 3. Base Path 和 SKILL.md 内容
-                                    content_index += 1
-                                    skill_content_start = {
-                                        "type": "content_block_start",
-                                        "index": content_index,
-                                        "content_block": {
-                                            "type": "text",
-                                            "text": ""
-                                        }
-                                    }
-                                    yield f"event: content_block_start\ndata: {orjson.dumps(skill_content_start).decode()}\n\n".encode()
-
-                                    skill_content_delta = {
-                                        "type": "content_block_delta",
-                                        "index": content_index,
-                                        "delta": {
-                                            "type": "text_delta",
-                                            "text": f"Base Path: {skill_base_path}\n\n{skill_content}\n"
-                                        }
-                                    }
-                                    yield f"event: content_block_delta\ndata: {orjson.dumps(skill_content_delta).decode()}\n\n".encode()
-
-                                    skill_content_stop = {
-                                        "type": "content_block_stop",
-                                        "index": content_index
-                                    }
-                                    yield f"event: content_block_stop\ndata: {orjson.dumps(skill_content_stop).decode()}\n\n".encode()
-
-                                    logger.info(
-                                        f"[Anthropic] 流式技能已加载: {skill_name}, base_path={skill_base_path}")
-                            else:
-                                # 如果没有 command，返回技能列表
-                                skill_list = SkillHandler.handle_skill_tool_call({
-                                })
-                                content_index += 1
-                                result_start_event = {
-                                    "type": "content_block_start",
-                                    "index": content_index,
-                                    "content_block": {
-                                        "type": "tool_result",
-                                        "tool_use_id": tc.id,
-                                        "content": ""
-                                    }
-                                }
-                                yield f"event: content_block_start\ndata: {orjson.dumps(result_start_event).decode()}\n\n".encode()
-
-                                result_delta_event = {
-                                    "type": "content_block_delta",
-                                    "index": content_index,
-                                    "delta": {
-                                        "type": "text_delta",
-                                        "text": skill_list
-                                    }
-                                }
-                                yield f"event: content_block_delta\ndata: {orjson.dumps(result_delta_event).decode()}\n\n".encode()
-
-                                result_stop_event = {
-                                    "type": "content_block_stop",
-                                    "index": content_index
-                                }
-                                yield f"event: content_block_stop\ndata: {orjson.dumps(result_stop_event).decode()}\n\n".encode()
-                        except Exception as e:
-                            logger.error(f"[Anthropic] 流式 Skill 工具处理失败: {e}")
+                        logger.info(
+                            f"[Anthropic] 流式 Skill 工具调用: {tc.input}, 将由 Claude Code 处理")
 
             else:
                 # 没有工具时，发送 content_block_stop

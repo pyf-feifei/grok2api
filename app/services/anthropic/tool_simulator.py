@@ -48,21 +48,21 @@ class ToolSimulator:
     )
 
     # Grok 模拟的工具调用格式：[Tool Call: Write]\n{"file_path":"...","content":"..."}\n[/Tool Call]
-    # 使用非贪婪匹配来处理嵌套 JSON
+    # 使用更智能的匹配：先找到开始标记，然后使用平衡括号匹配完整的 JSON
     GROK_TOOL_CALL_PATTERN = re.compile(
-        r'\[Tool Call:\s*(\w+)\]\s*\n?(\{.*?\})\s*\n?\[/Tool Call\]',
-        re.DOTALL | re.IGNORECASE
+        r'\[Tool Call:\s*(\w+)\]\s*\n?',
+        re.IGNORECASE
     )
 
     # 更宽松的格式：带代码块的工具调用
     GROK_TOOL_CALL_PATTERN_ALT = re.compile(
-        r'\[Tool Call:\s*(\w+)\]\s*\n?```(?:json)?\s*\n?(\{.*?\})\s*\n?```\s*\n?\[/Tool Call\]',
-        re.DOTALL | re.IGNORECASE
+        r'\[Tool Call:\s*(\w+)\]\s*\n?```(?:json)?\s*\n?',
+        re.IGNORECASE
     )
 
-    # 最宽松的格式：直接匹配完整的 JSON 块
-    GROK_TOOL_CALL_PATTERN_FULL = re.compile(
-        r'\[Tool Call:\s*(\w+)\]\s*\n?([\s\S]*?)\n?\[/Tool Call\]',
+    # 结束标记
+    TOOL_CALL_END_PATTERN = re.compile(
+        r'\s*\n?\[/Tool Call\]',
         re.IGNORECASE
     )
 
@@ -891,6 +891,57 @@ class ToolSimulator:
 
         return True
 
+    def _extract_balanced_json(self, text: str, start_pos: int) -> Optional[Tuple[int, int]]:
+        """提取平衡的 JSON 对象（处理嵌套的大括号）
+
+        Args:
+            text: 完整文本
+            start_pos: JSON 开始位置（第一个 { 的位置）
+
+        Returns:
+            (start, end) 位置元组，如果失败返回 None
+        """
+        if start_pos >= len(text) or text[start_pos] != '{':
+            return None
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        i = start_pos
+
+        while i < len(text):
+            char = text[i]
+
+            if escape_next:
+                escape_next = False
+                i += 1
+                continue
+
+            if char == '\\':
+                escape_next = True
+                i += 1
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                i += 1
+                continue
+
+            if in_string:
+                i += 1
+                continue
+
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    return (start_pos, i + 1)
+
+            i += 1
+
+        return None  # 未找到匹配的结束括号
+
     def _parse_grok_tool_calls(self, text: str) -> List[ToolCall]:
         """解析 Grok 模拟的工具调用格式
 
@@ -898,6 +949,8 @@ class ToolSimulator:
         [Tool Call: Write]
         {"file_path":"hello.py","content":"print('hello')"}
         [/Tool Call]
+
+        改进：使用平衡括号匹配来正确处理多行和嵌套 JSON
 
         Args:
             text: Grok 响应文本
@@ -908,38 +961,92 @@ class ToolSimulator:
         tool_calls = []
         parsed_positions = set()  # 避免重复解析同一位置
 
-        # 尝试多种模式匹配（按优先级）
-        patterns = [
-            (self.GROK_TOOL_CALL_PATTERN, False),  # 标准格式，已包含 {}
-            (self.GROK_TOOL_CALL_PATTERN_ALT, False),  # 带代码块格式，已包含 {}
-            (self.GROK_TOOL_CALL_PATTERN_FULL, True),  # 最宽松格式，需要清理
-        ]
+        # 先尝试标准格式（带代码块）
+        for alt_match in self.GROK_TOOL_CALL_PATTERN_ALT.finditer(text):
+            start_pos = alt_match.end()
+            tool_name = alt_match.group(1)
 
-        for pattern, needs_cleanup in patterns:
-            for match in pattern.finditer(text):
-                # 避免重复解析
-                pos_key = (match.start(), match.end())
+            # 查找结束标记
+            end_match = self.TOOL_CALL_END_PATTERN.search(text, start_pos)
+            if not end_match:
+                continue
+
+            json_start = start_pos
+            json_end = end_match.start()
+            json_content = text[json_start:json_end].strip()
+
+            # 移除代码块标记
+            json_content = re.sub(r'^```(?:json)?\s*', '', json_content)
+            json_content = re.sub(r'\s*```$', '', json_content)
+            json_content = json_content.strip()
+
+            # 查找 JSON 对象的实际开始位置
+            json_obj_start = json_content.find('{')
+            if json_obj_start == -1:
+                continue
+
+            json_obj_start += json_start + \
+                json_content[:json_obj_start].count('\n')
+
+            # 使用平衡括号匹配提取完整 JSON
+            json_range = self._extract_balanced_json(text, json_obj_start)
+            if json_range:
+                json_start, json_end = json_range
+                json_content = text[json_start:json_end]
+
+                pos_key = (alt_match.start(), end_match.end())
                 if pos_key in parsed_positions:
                     continue
 
-                tool_name = match.group(1)
-                json_content = match.group(2).strip()
+                try:
+                    tool_input = orjson.loads(json_content)
+                    if self.has_tool(tool_name):
+                        tool_call = ToolCall(
+                            id=self.generate_tool_id(),
+                            name=tool_name,
+                            input=tool_input
+                        )
+                        tool_calls.append(tool_call)
+                        parsed_positions.add(pos_key)
+                        logger.info(
+                            f"[ToolSimulator] 解析 Grok 工具调用 (带代码块): {tool_name}")
+                except Exception as e:
+                    logger.warning(
+                        f"[ToolSimulator] 解析 Grok 工具调用失败 ({tool_name}, 带代码块): {e}")
+                    continue
+
+        # 再尝试标准格式（不带代码块）
+        for match in self.GROK_TOOL_CALL_PATTERN.finditer(text):
+            start_pos = match.end()
+            tool_name = match.group(1)
+
+            # 查找结束标记
+            end_match = self.TOOL_CALL_END_PATTERN.search(text, start_pos)
+            if not end_match:
+                continue
+
+            json_start = start_pos
+            json_end = end_match.start()
+            json_content = text[json_start:json_end].strip()
+
+            # 查找 JSON 对象的实际开始位置
+            json_obj_start = json_content.find('{')
+            if json_obj_start == -1:
+                continue
+
+            json_obj_start += json_start
+
+            # 使用平衡括号匹配提取完整 JSON
+            json_range = self._extract_balanced_json(text, json_obj_start)
+            if json_range:
+                json_start, json_end = json_range
+                json_content = text[json_start:json_end]
+
+                pos_key = (match.start(), end_match.end())
+                if pos_key in parsed_positions:
+                    continue
 
                 try:
-                    # 清理 JSON 内容
-                    if needs_cleanup:
-                        # 移除可能的代码块标记
-                        json_content = re.sub(
-                            r'^```(?:json)?\s*', '', json_content)
-                        json_content = re.sub(r'\s*```$', '', json_content)
-                        json_content = json_content.strip()
-
-                    # 确保是有效的 JSON 对象
-                    if not json_content.startswith('{'):
-                        json_content = '{' + json_content
-                    if not json_content.endswith('}'):
-                        json_content = json_content + '}'
-
                     tool_input = orjson.loads(json_content)
 
                     # 根据官方文档，Skill 工具的参数是 command（保持不变）
@@ -997,14 +1104,19 @@ class ToolSimulator:
         """从文本中移除已解析的 [Tool Call: ...] 格式
 
         在工具调用成功解析后调用，避免文本内容重复显示工具调用
+
+        改进：使用更精确的匹配，避免误删正常内容
         """
         # 移除 [Tool Call: ...]...[/Tool Call] 格式
+        # 使用更精确的匹配：确保匹配完整的工具调用块
         cleaned = re.sub(
-            r'\[Tool Call:\s*\w+\].*?\[/Tool Call\]',
+            r'\[Tool Call:\s*\w+\]\s*\n?.*?\[/Tool Call\]',
             '',
             text,
-            flags=re.DOTALL
+            flags=re.DOTALL | re.IGNORECASE
         )
+        # 清理多余的空行
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()
 
     def parse_response(self, text: str, user_message: str = '') -> Tuple[str, List[ToolCall]]:
