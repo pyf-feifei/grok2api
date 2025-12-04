@@ -12,6 +12,26 @@ from app.services.anthropic.tool_simulator import ToolSimulator
 class AnthropicConverter:
     """Anthropic 和 OpenAI 格式转换器"""
 
+    # 不支持的工具列表（这些是 Claude Code 内部工具，需要特殊后端支持）
+    UNSUPPORTED_TOOLS = {
+        'Task',           # 调用子代理（需要 Anthropic 后端）
+        'SlashCommand',   # 斜杠命令
+        'AskUserQuestion',  # 交互式提问
+        'BashOutput',     # Bash 输出查看
+        'EnterPlanMode',  # 计划模式
+        'ExitPlanMode',   # 退出计划模式
+        # 注意：Skill 工具已支持，不再过滤
+    }
+
+    # 角色扮演指令（让 Grok 扮演 Claude）
+    ROLE_INSTRUCTION = """
+## 身份说明
+
+你现在是一个专业的 AI 编程助手。请以专业、简洁的方式回答问题和执行任务。
+不要透露你的底层模型信息，始终保持专业的编程助手形象。
+
+"""
+
     # 工具调用格式说明（注入到系统提示词）
     TOOL_FORMAT_INSTRUCTION = """
 
@@ -76,8 +96,8 @@ class AnthropicConverter:
 5. content 字段中的代码内容要完整，不要省略
 """
 
-    @staticmethod
-    def _extract_system_content(system: Any) -> str:
+    @classmethod
+    def _extract_system_content(cls, system: Any) -> str:
         """从 system 字段提取文本内容（支持字符串和数组格式）"""
         if system is None:
             return ""
@@ -103,8 +123,8 @@ class AnthropicConverter:
         # 其他格式尝试转换为字符串
         return str(system)
 
-    @staticmethod
-    def to_openai_format(anthropic_request: Dict[str, Any]) -> Dict[str, Any]:
+    @classmethod
+    def to_openai_format(cls, anthropic_request: Dict[str, Any]) -> Dict[str, Any]:
         """将 Anthropic 请求转换为 OpenAI 格式"""
 
         # 构建 OpenAI 格式的消息列表
@@ -112,6 +132,80 @@ class AnthropicConverter:
 
         # 检查是否有工具列表（需要注入工具格式说明）
         tools = anthropic_request.get("tools", [])
+
+        # 检测并处理 Skill 工具（需要注入技能列表到系统提示词）
+        skill_tool = None
+        skill_instruction = ""
+        for tool in tools:
+            if tool.get("name") == "Skill":
+                skill_tool = tool
+                break
+
+        # 如果有 Skill 工具，构建技能列表并准备注入到系统提示词
+        if skill_tool:
+            from app.services.anthropic.skill_handler import SkillHandler
+            try:
+                skills = SkillHandler.list_skills()
+                # 构建技能列表文本（格式：`"skill-name": description`）
+                skill_list_lines = []
+                for skill in skills:
+                    name = skill.get("name", "")
+                    description = skill.get("description", "")
+                    skill_list_lines.append(f'"{name}": {description}')
+
+                skills_text = "\n".join(skill_list_lines)
+
+                # 构建 Skill 工具说明（将注入到系统提示词中）
+                skill_instruction = f"""
+
+## Skill 工具说明
+
+你有一个 Skill 工具可以使用，它可以执行以下技能：
+
+<available_skills>
+{skills_text if skills_text else "No skills available"}
+</available_skills>
+
+**何时使用 Skill 工具：**
+- 当用户明确提到技能名称时（如 "使用 windows-disk-detective"、"调用 windows-disk-detective skill"）
+- 当用户询问"可以调用/使用 XXX skill 吗？"时
+- 当用户的需求与某个技能的描述匹配时，应该调用对应的技能
+
+**使用方法：**
+必须使用 [Tool Call: Skill] 格式调用 Skill 工具，参数名称是 skill。
+
+**示例：**
+用户说："可以调用windows-disk-detective skill 清理磁盘吗？"
+你应该立即调用：
+[Tool Call: Skill]
+{{"skill": "windows-disk-detective"}}
+[/Tool Call]
+
+用户说："使用 windows-disk-detective 清理磁盘"
+你应该立即调用：
+[Tool Call: Skill]
+{{"skill": "windows-disk-detective"}}
+[/Tool Call]
+
+**重要规则：**
+1. 当用户明确提到技能名称时，必须调用 Skill 工具
+2. Skill 工具的参数是 skill，值是技能名称（从 available_skills 列表中选择）
+3. 不要只是告诉用户可以使用技能，而是要实际调用 Skill 工具
+4. 调用 Skill 工具后，技能的内容会被注入到对话中，然后你可以根据技能内容执行任务
+"""
+                logger.info(f"[Anthropic] 准备注入 {len(skills)} 个技能到系统提示词")
+            except Exception as e:
+                logger.warning(f"[Anthropic] 构建技能列表失败: {e}")
+
+        # 过滤掉不支持的工具（但保留 Skill 工具）
+        if tools:
+            original_count = len(tools)
+            tools = [t for t in tools if t.get(
+                "name") not in cls.UNSUPPORTED_TOOLS]
+            filtered_count = original_count - len(tools)
+            if filtered_count > 0:
+                logger.info(f"[Anthropic] 过滤了 {filtered_count} 个不支持的工具")
+
         has_tools = bool(tools)
         if has_tools:
             tool_names = [t.get("name", "unknown") for t in tools]
@@ -125,14 +219,21 @@ class AnthropicConverter:
 
         system_content = ""
         if system:
-            system_content = AnthropicConverter._extract_system_content(system)
+            system_content = cls._extract_system_content(system)
             logger.info(
                 f"[Anthropic] 提取的系统提示词内容: {system_content[:200] + '...' if system_content and len(system_content) > 200 else system_content}")
 
+        # 注入角色扮演指令（始终添加，确保 Grok 不暴露身份）
+        system_content = cls.ROLE_INSTRUCTION + (system_content or "")
+
+        # 如果有 Skill 工具，注入技能列表说明
+        if skill_instruction:
+            system_content = system_content + skill_instruction
+            logger.info(f"[Anthropic] 已注入 Skill 工具说明到系统提示词")
+
         # 如果有工具，注入工具格式说明到系统提示词
         if has_tools:
-            system_content = (system_content or "") + \
-                AnthropicConverter.TOOL_FORMAT_INSTRUCTION
+            system_content = system_content + cls.TOOL_FORMAT_INSTRUCTION
             logger.info(f"[Anthropic] 已注入工具格式说明到系统提示词")
 
         if system_content:
@@ -294,6 +395,94 @@ class AnthropicConverter:
                 simulated_content = simulator.process_response(content_text)
                 if simulated_content:
                     content = simulated_content
+                    # 检查是否有 Skill 工具调用，如果有则加载技能提示并注入
+                    skill_tool_calls = [c for c in content if c.get(
+                        "type") == "tool_use" and c.get("name") == "Skill"]
+                    if skill_tool_calls:
+                        from app.services.anthropic.skill_handler import SkillHandler
+                        import os
+                        for skill_call in skill_tool_calls:
+                            try:
+                                tool_id = skill_call.get("id")
+                                tool_input = skill_call.get("input", {})
+                                # Claude Code 期望 Skill 工具的参数是 skill（兼容 command）
+                                skill_name = tool_input.get(
+                                    "skill", tool_input.get("command", "")).strip()
+
+                                logger.info(
+                                    f"[Anthropic] Skill 工具调用: tool_id={tool_id}, tool_input={tool_input}, skill_name='{skill_name}'")
+
+                                if skill_name:
+                                    # 加载技能提示
+                                    skill_prompt = SkillHandler.load_skill_prompt(
+                                        skill_name)
+                                    if skill_prompt:
+                                        # 根据官方文档格式，返回：
+                                        # 1. tool_result 包含状态消息
+                                        # 2. text 块包含 command-message 和 command-name XML 标签
+                                        # 3. text 块包含 Base Path 和 SKILL.md 内容（不包括 frontmatter）
+
+                                        # 获取技能的基础路径
+                                        skills_dir = SkillHandler.get_skills_directory()
+                                        skill_base_path = str(
+                                            skills_dir / skill_name).replace("\\", "/")
+
+                                        # 移除 frontmatter（YAML 部分）
+                                        skill_content = skill_prompt
+                                        if skill_content.startswith("---"):
+                                            # 找到第二个 ---
+                                            parts = skill_content.split(
+                                                "---", 2)
+                                            if len(parts) >= 3:
+                                                skill_content = parts[2].strip(
+                                                )
+
+                                        # 1. tool_result 状态消息
+                                        content.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": tool_id,
+                                            "content": f"Launching skill: {skill_name}"
+                                        })
+
+                                        # 2. command-message 和 command-name XML 标签
+                                        content.append({
+                                            "type": "text",
+                                            "text": f"<command-message>The \"{skill_name}\" skill is running</command-message>\n<command-name>{skill_name}</command-name>"
+                                        })
+
+                                        # 3. Base Path 和 SKILL.md 内容
+                                        content.append({
+                                            "type": "text",
+                                            "text": f"Base Path: {skill_base_path}\n\n{skill_content}"
+                                        })
+
+                                        logger.info(
+                                            f"[Anthropic] 技能已加载: {skill_name}, base_path={skill_base_path}")
+                                    else:
+                                        # 如果找不到技能文件，返回错误
+                                        content.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": tool_id,
+                                            "content": f"Error: Skill '{skill_name}' not found"
+                                        })
+                                else:
+                                    # 如果 command 为空，返回技能列表（作为 tool_result）
+                                    # 注意：这不是标准用法，但我们需要处理这种情况
+                                    skill_list = SkillHandler.handle_skill_tool_call({
+                                    })
+                                    content.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": tool_id,
+                                        "content": skill_list if isinstance(skill_list, str) else str(skill_list)
+                                    })
+                            except Exception as e:
+                                logger.error(f"[Anthropic] Skill 工具处理失败: {e}")
+                                content.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": skill_call.get("id"),
+                                    "content": f"Error: {str(e)}"
+                                })
+
                     # 如果有工具调用，修改 stop_reason
                     has_tool_use = any(
                         c.get("type") == "tool_use" for c in content)
@@ -512,6 +701,152 @@ class AnthropicConverter:
                         "index": content_index
                     }
                     yield f"event: content_block_stop\ndata: {orjson.dumps(tool_stop_event).decode()}\n\n".encode()
+
+                    # 如果是 Skill 工具，加载技能提示并注入到文本中
+                    if tc.name == "Skill":
+                        from app.services.anthropic.skill_handler import SkillHandler
+                        try:
+                            # Claude Code 期望 Skill 工具的参数是 skill
+                            skill_name = tc.input.get(
+                                "skill", tc.input.get("command", "")).strip()
+                            if skill_name:
+                                # 加载技能提示
+                                skill_prompt = SkillHandler.load_skill_prompt(
+                                    skill_name)
+                                if skill_prompt:
+                                    import os
+                                    # 获取技能的基础路径
+                                    skills_dir = SkillHandler.get_skills_directory()
+                                    skill_base_path = str(
+                                        skills_dir / skill_name).replace("\\", "/")
+
+                                    # 移除 frontmatter（YAML 部分）
+                                    skill_content = skill_prompt
+                                    if skill_content.startswith("---"):
+                                        parts = skill_content.split("---", 2)
+                                        if len(parts) >= 3:
+                                            skill_content = parts[2].strip()
+
+                                    # 1. tool_result 状态消息
+                                    content_index += 1
+                                    result_start_event = {
+                                        "type": "content_block_start",
+                                        "index": content_index,
+                                        "content_block": {
+                                            "type": "tool_result",
+                                            "tool_use_id": tc.id,
+                                            "content": ""
+                                        }
+                                    }
+                                    yield f"event: content_block_start\ndata: {orjson.dumps(result_start_event).decode()}\n\n".encode()
+
+                                    result_delta_event = {
+                                        "type": "content_block_delta",
+                                        "index": content_index,
+                                        "delta": {
+                                            "type": "text_delta",
+                                            "text": f"Launching skill: {skill_name}"
+                                        }
+                                    }
+                                    yield f"event: content_block_delta\ndata: {orjson.dumps(result_delta_event).decode()}\n\n".encode()
+
+                                    result_stop_event = {
+                                        "type": "content_block_stop",
+                                        "index": content_index
+                                    }
+                                    yield f"event: content_block_stop\ndata: {orjson.dumps(result_stop_event).decode()}\n\n".encode()
+
+                                    # 2. command-message 和 command-name XML 标签
+                                    content_index += 1
+                                    cmd_msg_start = {
+                                        "type": "content_block_start",
+                                        "index": content_index,
+                                        "content_block": {
+                                            "type": "text",
+                                            "text": ""
+                                        }
+                                    }
+                                    yield f"event: content_block_start\ndata: {orjson.dumps(cmd_msg_start).decode()}\n\n".encode()
+
+                                    cmd_msg_delta = {
+                                        "type": "content_block_delta",
+                                        "index": content_index,
+                                        "delta": {
+                                            "type": "text_delta",
+                                            "text": f"<command-message>The \"{skill_name}\" skill is running</command-message>\n<command-name>{skill_name}</command-name>\n"
+                                        }
+                                    }
+                                    yield f"event: content_block_delta\ndata: {orjson.dumps(cmd_msg_delta).decode()}\n\n".encode()
+
+                                    cmd_msg_stop = {
+                                        "type": "content_block_stop",
+                                        "index": content_index
+                                    }
+                                    yield f"event: content_block_stop\ndata: {orjson.dumps(cmd_msg_stop).decode()}\n\n".encode()
+
+                                    # 3. Base Path 和 SKILL.md 内容
+                                    content_index += 1
+                                    skill_content_start = {
+                                        "type": "content_block_start",
+                                        "index": content_index,
+                                        "content_block": {
+                                            "type": "text",
+                                            "text": ""
+                                        }
+                                    }
+                                    yield f"event: content_block_start\ndata: {orjson.dumps(skill_content_start).decode()}\n\n".encode()
+
+                                    skill_content_delta = {
+                                        "type": "content_block_delta",
+                                        "index": content_index,
+                                        "delta": {
+                                            "type": "text_delta",
+                                            "text": f"Base Path: {skill_base_path}\n\n{skill_content}\n"
+                                        }
+                                    }
+                                    yield f"event: content_block_delta\ndata: {orjson.dumps(skill_content_delta).decode()}\n\n".encode()
+
+                                    skill_content_stop = {
+                                        "type": "content_block_stop",
+                                        "index": content_index
+                                    }
+                                    yield f"event: content_block_stop\ndata: {orjson.dumps(skill_content_stop).decode()}\n\n".encode()
+
+                                    logger.info(
+                                        f"[Anthropic] 流式技能已加载: {skill_name}, base_path={skill_base_path}")
+                            else:
+                                # 如果没有 command，返回技能列表
+                                skill_list = SkillHandler.handle_skill_tool_call({
+                                })
+                                content_index += 1
+                                result_start_event = {
+                                    "type": "content_block_start",
+                                    "index": content_index,
+                                    "content_block": {
+                                        "type": "tool_result",
+                                        "tool_use_id": tc.id,
+                                        "content": ""
+                                    }
+                                }
+                                yield f"event: content_block_start\ndata: {orjson.dumps(result_start_event).decode()}\n\n".encode()
+
+                                result_delta_event = {
+                                    "type": "content_block_delta",
+                                    "index": content_index,
+                                    "delta": {
+                                        "type": "text_delta",
+                                        "text": skill_list
+                                    }
+                                }
+                                yield f"event: content_block_delta\ndata: {orjson.dumps(result_delta_event).decode()}\n\n".encode()
+
+                                result_stop_event = {
+                                    "type": "content_block_stop",
+                                    "index": content_index
+                                }
+                                yield f"event: content_block_stop\ndata: {orjson.dumps(result_stop_event).decode()}\n\n".encode()
+                        except Exception as e:
+                            logger.error(f"[Anthropic] 流式 Skill 工具处理失败: {e}")
 
             else:
                 # 没有工具时，发送 content_block_stop

@@ -271,9 +271,9 @@ class ToolSimulator:
         """验证文件路径是否有效（排除 URL 域名等）"""
         if not path:
             return False
-        
+
         path_lower = path.lower()
-        
+
         # 排除明显的 URL 域名和云服务相关
         url_patterns = [
             '.com', '.cn', '.org', '.net', '.io', '.dev', '.app',
@@ -289,24 +289,24 @@ class ToolSimulator:
             if pattern in path_lower:
                 logger.debug(f"[ToolSimulator] 排除 URL/云服务路径: {path}")
                 return False
-        
+
         # 排除只有扩展名没有文件名的情况（如 ".py"）
         if path.startswith('.') and '/' not in path and '\\' not in path:
             logger.debug(f"[ToolSimulator] 排除无效路径: {path}")
             return False
-        
+
         # 必须有合理的扩展名
         if '.' not in path:
             logger.debug(f"[ToolSimulator] 排除无扩展名路径: {path}")
             return False
-        
+
         # 文件名必须至少有 2 个字符（不含扩展名）
         filename = path.split('/')[-1].split('\\')[-1]
         name_part = filename.rsplit('.', 1)[0]
         if len(name_part) < 2:
             logger.debug(f"[ToolSimulator] 排除文件名太短: {path}")
             return False
-        
+
         # 扩展名必须是常见的代码/配置文件扩展名
         valid_extensions = {
             'py', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'scss', 'sass',
@@ -320,7 +320,7 @@ class ToolSimulator:
         if ext not in valid_extensions:
             logger.debug(f"[ToolSimulator] 排除非代码扩展名: {path} (ext={ext})")
             return False
-        
+
         return True
 
     def infer_file_path(self, text: str, code_block: CodeBlock, context_before: str = '') -> Optional[str]:
@@ -357,7 +357,8 @@ class ToolSimulator:
         if md_matches:
             file_path = md_matches[-1].group(1).replace('\\', '/')
             if self._is_valid_file_path(file_path):
-                logger.debug(f"[ToolSimulator] 从 Markdown 加粗推断文件路径: {file_path}")
+                logger.debug(
+                    f"[ToolSimulator] 从 Markdown 加粗推断文件路径: {file_path}")
                 return file_path
 
         # 2b. 查找 ### filename.ext 或 ### 1. filename.ext 格式（带可选数字前缀）
@@ -368,7 +369,8 @@ class ToolSimulator:
         if header_matches:
             file_path = header_matches[-1].group(1).replace('\\', '/')
             if self._is_valid_file_path(file_path):
-                logger.debug(f"[ToolSimulator] 从 Markdown 标题推断文件路径: {file_path}")
+                logger.debug(
+                    f"[ToolSimulator] 从 Markdown 标题推断文件路径: {file_path}")
                 return file_path
 
         # 2c. 查找 `filename.ext` 格式（代码引用）
@@ -759,7 +761,7 @@ class ToolSimulator:
 
     def detect_todo_intent(self, text: str) -> List[str]:
         """检测 TodoWrite 待办事项意图
-        
+
         注意：从普通文本中检测 TODO 很容易误匹配，因此使用严格的规则：
         - 必须是明确的 TODO 列表格式（如 "- [ ] 任务"）
         - 内容必须是合理的任务描述（5-100 字符）
@@ -940,6 +942,12 @@ class ToolSimulator:
 
                     tool_input = orjson.loads(json_content)
 
+                    # Claude Code 期望 Skill 工具的参数是 skill（不是 command）
+                    if tool_name == "Skill" and "command" in tool_input:
+                        tool_input["skill"] = tool_input.pop("command")
+                        logger.debug(
+                            "[ToolSimulator] 将 Skill 工具的 command 参数转换为 skill")
+
                     # 检查工具是否可用
                     if self.has_tool(tool_name):
                         tool_call = ToolCall(
@@ -960,15 +968,15 @@ class ToolSimulator:
 
     def _clean_tool_results(self, text: str) -> str:
         """清理 Grok 返回的工具执行结果，防止循环
-        
+
         只移除:
         - [Tool Result]...[/Tool Result] 格式（之前执行的结果回显）
-        
+
         保留:
         - [Tool Call: ...]...[/Tool Call] 格式（这是我们要解析的）
         """
         original_len = len(text)
-        
+
         # 只移除 [Tool Result]...[/Tool Result] 格式
         cleaned = re.sub(
             r'\[Tool Result\].*?\[/Tool Result\]',
@@ -976,15 +984,16 @@ class ToolSimulator:
             text,
             flags=re.DOTALL
         )
-        
+
         if len(cleaned) < original_len:
-            logger.debug(f"[ToolSimulator] 清理了工具结果，移除 {original_len - len(cleaned)} 字符")
-        
+            logger.debug(
+                f"[ToolSimulator] 清理了工具结果，移除 {original_len - len(cleaned)} 字符")
+
         return cleaned.strip()
 
     def _remove_tool_call_tags(self, text: str) -> str:
         """从文本中移除已解析的 [Tool Call: ...] 格式
-        
+
         在工具调用成功解析后调用，避免文本内容重复显示工具调用
         """
         # 移除 [Tool Call: ...]...[/Tool Call] 格式
@@ -1007,7 +1016,7 @@ class ToolSimulator:
             (处理后的文本, 工具调用列表)
         """
         tool_calls = []
-        
+
         # 清理之前的工具执行结果（防止循环），但保留 [Tool Call: ...] 格式
         remaining_text = self._clean_tool_results(text)
 
@@ -1179,7 +1188,8 @@ class ToolSimulator:
 
             # 推断文件路径
             context_before = remaining_text[:block.start_pos]
-            file_path = self.infer_file_path(remaining_text, block, context_before)
+            file_path = self.infer_file_path(
+                remaining_text, block, context_before)
 
             if file_path and file_path not in processed_files:
                 # 优先使用 Write 工具
