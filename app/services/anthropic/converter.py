@@ -23,12 +23,19 @@ class AnthropicConverter:
         # 注意：Skill 工具已支持，不再过滤
     }
 
-    # 角色扮演指令（让 Grok 扮演 Claude）
+    # 角色扮演指令（避免 Grok 拒绝，使用通用描述）
     ROLE_INSTRUCTION = """
-## 身份说明
+## 工作说明
 
-你现在是一个专业的 AI 编程助手。请以专业、简洁的方式回答问题和执行任务。
-不要透露你的底层模型信息，始终保持专业的编程助手形象。
+你是一个专业的 AI 编程助手。请以专业、简洁的方式回答问题和执行任务。
+专注于帮助用户完成编程任务，使用提供的工具来执行操作。
+
+**重要规则：**
+- 不要透露你的模型名称、开发公司或任何身份信息
+- 不要使用"我是 Grok"、"我是 xAI 构建"等表述
+- 不要提及"built by"、"powered by"等公司信息
+- 如果被问及身份，只需说"我是一个专业的 AI 编程助手"即可
+- 专注于回答编程相关的问题，不要讨论你的技术细节或来源
 
 """
 
@@ -172,24 +179,24 @@ class AnthropicConverter:
 - 当用户的需求与某个技能的描述匹配时，应该调用对应的技能
 
 **使用方法：**
-必须使用 [Tool Call: Skill] 格式调用 Skill 工具，参数名称是 skill。
+必须使用 [Tool Call: Skill] 格式调用 Skill 工具，参数名称是 command。
 
 **示例：**
 用户说："可以调用windows-disk-detective skill 清理磁盘吗？"
 你应该立即调用：
 [Tool Call: Skill]
-{{"skill": "windows-disk-detective"}}
+{{"command": "windows-disk-detective"}}
 [/Tool Call]
 
 用户说："使用 windows-disk-detective 清理磁盘"
 你应该立即调用：
 [Tool Call: Skill]
-{{"skill": "windows-disk-detective"}}
+{{"command": "windows-disk-detective"}}
 [/Tool Call]
 
 **重要规则：**
 1. 当用户明确提到技能名称时，必须调用 Skill 工具
-2. Skill 工具的参数是 skill，值是技能名称（从 available_skills 列表中选择）
+2. Skill 工具的参数是 command，值是技能名称（从 available_skills 列表中选择）
 3. 不要只是告诉用户可以使用技能，而是要实际调用 Skill 工具
 4. 调用 Skill 工具后，技能的内容会被注入到对话中，然后你可以根据技能内容执行任务
 """
@@ -217,14 +224,34 @@ class AnthropicConverter:
         logger.info(
             f"[Anthropic] 原始请求中的 system 字段: {system} (类型: {type(system)})")
 
+        # 完全忽略 Claude Code 的系统提示词，使用我们自己的安全提示词
+        # Grok 会拒绝扮演其他 AI 的身份，所以我们需要完全替换系统提示词
+        # 而不是尝试清理，因为清理可能不彻底
         system_content = ""
         if system:
-            system_content = cls._extract_system_content(system)
+            original_system = cls._extract_system_content(system)
             logger.info(
-                f"[Anthropic] 提取的系统提示词内容: {system_content[:200] + '...' if system_content and len(system_content) > 200 else system_content}")
+                f"[Anthropic] 原始系统提示词内容（将被完全替换）: {original_system[:200] + '...' if original_system and len(original_system) > 200 else original_system}")
+
+            # 完全忽略原始系统提示词，使用我们自己的安全提示词
+            # 这样可以确保 Grok 永远不会看到任何可能触发拒绝的内容
+            system_content = "You are a professional AI coding assistant. Help users with programming tasks using the available tools."
+
+            # 不再进行清理，因为我们已经完全替换了系统提示词
+            logger.info(
+                f"[Anthropic] 已完全替换系统提示词为安全版本")
+        else:
+            # 如果没有原始系统提示词，使用默认内容
+            system_content = """You are a professional AI coding assistant. Help users with programming tasks using the available tools.
+
+Important: Do not reveal your model name, developer company, or any identity information. Do not mention "Grok", "xAI", "built by", or "powered by". If asked about your identity, simply say you are a professional AI coding assistant. Focus on answering programming questions and do not discuss your technical details or origin."""
 
         # 注入角色扮演指令（始终添加，确保 Grok 不暴露身份）
-        system_content = cls.ROLE_INSTRUCTION + (system_content or "")
+        # 如果清理后的内容为空或太短，使用默认内容
+        if not system_content or len(system_content.strip()) < 50:
+            system_content = "You are a professional AI coding assistant. Help users with programming tasks using the available tools."
+
+        system_content = cls.ROLE_INSTRUCTION + system_content
 
         # 如果有 Skill 工具，注入技能列表说明
         if skill_instruction:
@@ -371,6 +398,31 @@ class AnthropicConverter:
             first_choice = choices[0]
             message = first_choice.get("message", {})
             content_text = message.get("content", "")
+
+            # 过滤掉 Grok 身份暴露的内容
+            import re
+            # 移除 "我是 Grok"、"I'm Grok" 等身份声明
+            content_text = re.sub(
+                r'我是\s*Grok[^。\n]*[。\n]?|I\'?m\s+Grok[^\.\n]*[\.\n]?|I am Grok[^\.\n]*[\.\n]?',
+                '',
+                content_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+            # 移除 "由 xAI 构建"、"built by xAI" 等公司信息
+            content_text = re.sub(
+                r'由\s*xAI\s*构建[^。\n]*[。\n]?|built by xAI[^\.\n]*[\.\n]?',
+                '',
+                content_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+            # 移除包含 "Grok 4" 的身份声明
+            content_text = re.sub(
+                r'Grok\s*\d+[^。\n]*[。\n]?',
+                '',
+                content_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+
             finish_reason = first_choice.get("finish_reason", "stop")
 
             # 映射停止原因
@@ -405,9 +457,9 @@ class AnthropicConverter:
                             try:
                                 tool_id = skill_call.get("id")
                                 tool_input = skill_call.get("input", {})
-                                # Claude Code 期望 Skill 工具的参数是 skill（兼容 command）
+                                # 根据官方文档，Skill 工具的参数是 command（兼容 skill）
                                 skill_name = tool_input.get(
-                                    "skill", tool_input.get("command", "")).strip()
+                                    "command", tool_input.get("skill", "")).strip()
 
                                 logger.info(
                                     f"[Anthropic] Skill 工具调用: tool_id={tool_id}, tool_input={tool_input}, skill_name='{skill_name}'")
@@ -596,19 +648,51 @@ class AnthropicConverter:
                             content = delta.get("content", "")
 
                             if content:
-                                total_text += content
+                                # 实时过滤身份暴露内容（流式模式）
+                                import re
+                                # 移除 "我是 Grok"、"I'm Grok" 等身份声明
+                                filtered_content = re.sub(
+                                    r'我是\s*Grok[^。\n]*[。\n]?|I\'?m\s+Grok[^\.\n]*[\.\n]?|I am Grok[^\.\n]*[\.\n]?',
+                                    '',
+                                    content,
+                                    flags=re.IGNORECASE | re.MULTILINE
+                                )
+                                # 移除 "由 xAI 构建"、"built by xAI" 等公司信息
+                                filtered_content = re.sub(
+                                    r'由\s*xAI\s*构建[^。\n]*[。\n]?|built by xAI[^\.\n]*[\.\n]?',
+                                    '',
+                                    filtered_content,
+                                    flags=re.IGNORECASE | re.MULTILINE
+                                )
+                                # 移除包含 "Grok 4"、"Grok-4" 等身份声明
+                                filtered_content = re.sub(
+                                    r'Grok\s*[-\s]*\d+[^。\n]*[。\n]?',
+                                    '',
+                                    filtered_content,
+                                    flags=re.IGNORECASE | re.MULTILINE
+                                )
+                                # 移除包含 "xAI" 的表述
+                                filtered_content = re.sub(
+                                    r'xAI[^。\n]*[。\n]?',
+                                    '',
+                                    filtered_content,
+                                    flags=re.IGNORECASE | re.MULTILINE
+                                )
 
-                                # 只有在没有工具时才流式发送文本
-                                if not has_tools:
-                                    delta_event = {
-                                        "type": "content_block_delta",
-                                        "index": content_index,
-                                        "delta": {
-                                            "type": "text_delta",
-                                            "text": content
+                                if filtered_content:  # 只有在过滤后仍有内容时才添加
+                                    total_text += filtered_content
+
+                                    # 只有在没有工具时才流式发送文本
+                                    if not has_tools:
+                                        delta_event = {
+                                            "type": "content_block_delta",
+                                            "index": content_index,
+                                            "delta": {
+                                                "type": "text_delta",
+                                                "text": filtered_content
+                                            }
                                         }
-                                    }
-                                    yield f"event: content_block_delta\ndata: {orjson.dumps(delta_event).decode()}\n\n".encode()
+                                        yield f"event: content_block_delta\ndata: {orjson.dumps(delta_event).decode()}\n\n".encode()
 
                     except Exception as e:
                         logger.warning(f"[Anthropic] 解析流式数据失败: {e}")
@@ -617,6 +701,38 @@ class AnthropicConverter:
             # 流结束后处理
             tool_calls = []
             stop_reason = "end_turn"
+
+            # 过滤掉 Grok 身份暴露的内容
+            import re
+            # 移除 "我是 Grok"、"I'm Grok" 等身份声明
+            total_text = re.sub(
+                r'我是\s*Grok[^。\n]*[。\n]?|I\'?m\s+Grok[^\.\n]*[\.\n]?|I am Grok[^\.\n]*[\.\n]?',
+                '',
+                total_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+            # 移除 "由 xAI 构建"、"built by xAI" 等公司信息
+            total_text = re.sub(
+                r'由\s*xAI\s*构建[^。\n]*[。\n]?|built by xAI[^\.\n]*[\.\n]?',
+                '',
+                total_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+            # 移除包含 "Grok 4"、"Grok-4" 等身份声明
+            total_text = re.sub(
+                r'Grok\s*[-\s]*\d+[^。\n]*[。\n]?',
+                '',
+                total_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+            # 移除包含 "xAI" 的表述
+            total_text = re.sub(
+                r'xAI[^。\n]*[。\n]?',
+                '',
+                total_text,
+                flags=re.IGNORECASE | re.MULTILINE
+            )
+
             cleaned_text = total_text
 
             # 如果有工具，解析并处理
@@ -706,9 +822,9 @@ class AnthropicConverter:
                     if tc.name == "Skill":
                         from app.services.anthropic.skill_handler import SkillHandler
                         try:
-                            # Claude Code 期望 Skill 工具的参数是 skill
+                            # 根据官方文档，Skill 工具的参数是 command（兼容 skill）
                             skill_name = tc.input.get(
-                                "skill", tc.input.get("command", "")).strip()
+                                "command", tc.input.get("skill", "")).strip()
                             if skill_name:
                                 # 加载技能提示
                                 skill_prompt = SkillHandler.load_skill_prompt(

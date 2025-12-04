@@ -32,48 +32,110 @@ class SkillHandler:
             技能列表，每个技能包含 name, description, version 等信息
         """
         skills_dir = cls.get_skills_directory()
+        home_dir = Path.home()
         skills = []
+        skill_names_found = set()  # 避免重复
 
-        if not skills_dir.exists():
-            logger.warning(f"[SkillHandler] 技能目录不存在: {skills_dir}")
-            return skills
+        # 1. 扫描用户安装的 skills (~/.claude/skills)
+        if skills_dir.exists():
+            logger.info(f"[SkillHandler] 扫描技能目录: {skills_dir}")
+            json_files = list(skills_dir.glob("*.json"))
 
-        logger.info(f"[SkillHandler] 扫描技能目录: {skills_dir}")
+            for json_file in json_files:
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        skill_data = json.load(f)
 
-        # 查找所有 JSON 文件（技能元数据文件）
-        json_files = list(skills_dir.glob("*.json"))
+                    skill_name = skill_data.get("name", json_file.stem)
+                    skill_info = {
+                        "name": skill_name,
+                        "description": skill_data.get("description", ""),
+                        "version": skill_data.get("version", "1.0.0"),
+                        "author": skill_data.get("author", ""),
+                        "category": skill_data.get("category", ""),
+                        "tags": skill_data.get("tags", []),
+                        "capabilities": skill_data.get("capabilities", []),
+                        "file": str(json_file.name),
+                    }
 
-        for json_file in json_files:
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    skill_data = json.load(f)
+                    # 检查是否有对应的 MD 文件
+                    md_file = json_file.with_suffix('.md')
+                    if md_file.exists():
+                        skill_info["has_documentation"] = True
+                        skill_info["documentation_file"] = md_file.name
+                    else:
+                        skill_info["has_documentation"] = False
 
-                # 提取关键信息
-                skill_info = {
-                    "name": skill_data.get("name", json_file.stem),
-                    "description": skill_data.get("description", ""),
-                    "version": skill_data.get("version", "1.0.0"),
-                    "author": skill_data.get("author", ""),
-                    "category": skill_data.get("category", ""),
-                    "tags": skill_data.get("tags", []),
-                    "capabilities": skill_data.get("capabilities", []),
-                    "file": str(json_file.name),
-                }
+                    skills.append(skill_info)
+                    skill_names_found.add(skill_name)
+                    logger.debug(f"[SkillHandler] 找到技能: {skill_name}")
 
-                # 检查是否有对应的 MD 文件
-                md_file = json_file.with_suffix('.md')
-                if md_file.exists():
-                    skill_info["has_documentation"] = True
-                    skill_info["documentation_file"] = md_file.name
-                else:
-                    skill_info["has_documentation"] = False
+                except Exception as e:
+                    logger.warning(f"[SkillHandler] 解析技能文件失败 {json_file}: {e}")
+                    continue
 
-                skills.append(skill_info)
-                logger.debug(f"[SkillHandler] 找到技能: {skill_info['name']}")
+        # 2. 扫描 superpowers 插件中的 skills (~/.claude/plugins/cache/superpowers/skills)
+        superpowers_skills_dir = home_dir / ".claude" / \
+            "plugins" / "cache" / "superpowers" / "skills"
+        if superpowers_skills_dir.exists():
+            logger.info(
+                f"[SkillHandler] 扫描 superpowers 技能目录: {superpowers_skills_dir}")
 
-            except Exception as e:
-                logger.warning(f"[SkillHandler] 解析技能文件失败 {json_file}: {e}")
-                continue
+            # 查找所有子目录（每个技能一个目录）
+            for skill_dir in superpowers_skills_dir.iterdir():
+                if not skill_dir.is_dir():
+                    continue
+
+                skill_name = skill_dir.name
+                if skill_name in skill_names_found:
+                    continue  # 避免重复
+
+                # 查找 SKILL.md 文件
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.exists():
+                    skill_md = skill_dir / "skill.md"
+
+                if skill_md.exists():
+                    try:
+                        # 从 SKILL.md 提取信息（读取前几行获取描述）
+                        with open(skill_md, 'r', encoding='utf-8') as f:
+                            content = f.read()
+
+                        # 提取描述（从标题或第一段）
+                        description = ""
+                        lines = content.split('\n')
+                        for i, line in enumerate(lines[:20]):  # 只检查前20行
+                            line = line.strip()
+                            if line.startswith('# '):
+                                # 标题行，跳过
+                                continue
+                            elif line and not line.startswith('---') and not line.startswith('#'):
+                                # 找到第一个非标题、非 frontmatter 的内容行作为描述
+                                description = line[:200]  # 限制长度
+                                break
+
+                        skill_info = {
+                            "name": skill_name,
+                            "description": description or f"Skill: {skill_name}",
+                            "version": "1.0.0",
+                            "author": "",
+                            "category": "superpowers",
+                            "tags": [],
+                            "capabilities": [],
+                            "file": str(skill_md.name),
+                            "has_documentation": True,
+                            "documentation_file": skill_md.name,
+                        }
+
+                        skills.append(skill_info)
+                        skill_names_found.add(skill_name)
+                        logger.debug(
+                            f"[SkillHandler] 找到 superpowers 技能: {skill_name}")
+
+                    except Exception as e:
+                        logger.warning(
+                            f"[SkillHandler] 读取 superpowers 技能失败 {skill_dir}: {e}")
+                        continue
 
         logger.info(f"[SkillHandler] 共找到 {len(skills)} 个技能")
         return skills
@@ -132,12 +194,22 @@ class SkillHandler:
             SKILL.md 文件内容，如果不存在则返回 None
         """
         skills_dir = cls.get_skills_directory()
+        home_dir = Path.home()
 
-        # 尝试多种可能的文件名
+        # 尝试多种可能的路径：
+        # 1. ~/.claude/skills/{skill_name}/SKILL.md (用户安装的 skills)
+        # 2. ~/.claude/plugins/cache/superpowers/skills/{skill_name}/SKILL.md (superpowers 插件)
+        # 3. ~/.claude/skills/{skill_name}.md (直接放在 skills 目录下的文件)
         possible_files = [
-            skills_dir / f"{skill_name}.md",
+            # 用户安装的 skills
             skills_dir / skill_name / "SKILL.md",
             skills_dir / skill_name / "skill.md",
+            skills_dir / f"{skill_name}.md",
+            # superpowers 插件中的 skills
+            home_dir / ".claude" / "plugins" / "cache" /
+            "superpowers" / "skills" / skill_name / "SKILL.md",
+            home_dir / ".claude" / "plugins" / "cache" /
+            "superpowers" / "skills" / skill_name / "skill.md",
         ]
 
         for md_file in possible_files:

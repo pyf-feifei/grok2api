@@ -942,11 +942,13 @@ class ToolSimulator:
 
                     tool_input = orjson.loads(json_content)
 
-                    # Claude Code 期望 Skill 工具的参数是 skill（不是 command）
+                    # 根据官方文档，Skill 工具的参数是 command（保持不变）
+                    # 但 Claude Code 可能期望 skill，所以同时保留两个参数以确保兼容性
                     if tool_name == "Skill" and "command" in tool_input:
-                        tool_input["skill"] = tool_input.pop("command")
+                        # 保留 command，同时添加 skill 以确保兼容性
+                        tool_input["skill"] = tool_input["command"]
                         logger.debug(
-                            "[ToolSimulator] 将 Skill 工具的 command 参数转换为 skill")
+                            "[ToolSimulator] Skill 工具同时设置 command 和 skill 参数以确保兼容性")
 
                     # 检查工具是否可用
                     if self.has_tool(tool_name):
