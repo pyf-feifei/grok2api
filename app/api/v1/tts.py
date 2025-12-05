@@ -21,14 +21,15 @@ async def create_speech(
 ):
     """
     创建语音（文本转语音）
-    
+
     标准OpenAI兼容接口，支持将文本转换为语音。
     注意：Grok返回WAV格式音频，voice和speed参数可能不被支持。
     """
     try:
         logger.info(f"[TTS] 收到TTS请求，文本长度: {len(request.input)} 字符")
-        logger.debug(f"[TTS] 请求参数 - model: {request.model}, voice: {request.voice}, format: {request.response_format}")
-        
+        logger.debug(
+            f"[TTS] 请求参数 - model: {request.model}, voice: {request.voice}, format: {request.response_format}")
+
         # 验证文本长度
         if len(request.input) == 0:
             raise HTTPException(
@@ -41,7 +42,7 @@ async def create_speech(
                     }
                 }
             )
-        
+
         # 限制文本长度（避免过长）
         max_length = 5000  # 可以根据需要调整
         if len(request.input) > max_length:
@@ -55,7 +56,7 @@ async def create_speech(
                     }
                 }
             )
-        
+
         # 调用TTS服务
         try:
             audio_data = await GrokTTSService.text_to_speech(
@@ -74,7 +75,7 @@ async def create_speech(
                     }
                 }
             )
-        
+
         # 确定Content-Type
         # Grok返回WAV格式，但根据request.response_format设置Content-Type
         content_type_map = {
@@ -84,18 +85,20 @@ async def create_speech(
             "aac": "audio/aac",
             "flac": "audio/flac"
         }
-        
+
         response_format = request.response_format or "wav"
-        content_type = content_type_map.get(response_format.lower(), "audio/wav")
-        
+        content_type = content_type_map.get(
+            response_format.lower(), "audio/wav")
+
         # 注意：如果请求的格式不是wav，但Grok只返回wav，这里仍然返回wav
         # 如果需要格式转换，可以后续添加转换逻辑
         if response_format.lower() != "wav":
             logger.warning(f"[TTS] 请求格式 {response_format} 可能不被支持，返回WAV格式")
             content_type = "audio/wav"
-        
-        logger.info(f"[TTS] 成功生成语音，大小: {len(audio_data)} bytes, Content-Type: {content_type}")
-        
+
+        logger.info(
+            f"[TTS] 成功生成语音，大小: {len(audio_data)} bytes, Content-Type: {content_type}")
+
         # 返回音频流
         return Response(
             content=audio_data,
@@ -105,7 +108,7 @@ async def create_speech(
                 "Content-Length": str(len(audio_data))
             }
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -120,8 +123,3 @@ async def create_speech(
                 }
             }
         )
-
-
-
-
-
