@@ -443,13 +443,147 @@ class ToolSimulator:
 
     def create_bash_tool_call(self, command: str) -> ToolCall:
         """创建 Bash 工具调用"""
+        # 自动转换 Windows 命令为 bash 等效命令
+        converted_command = self._convert_windows_to_bash(command)
         return ToolCall(
             id=self.generate_tool_id(),
             name="Bash",
             input={
-                "command": command
+                "command": converted_command
             }
         )
+
+    def _convert_windows_to_bash(self, command: str) -> str:
+        """将 Windows CMD 命令转换为 bash 等效命令
+
+        支持的转换：
+        - del /Q "path" → rm -f "path"
+        - del "path" → rm "path"
+        - copy → cp
+        - move → mv
+        - type → cat
+        - dir → ls
+        - mkdir → mkdir -p
+        - rmdir /S /Q → rm -rf
+        - cls → clear
+        - echo. → echo
+        """
+        original_command = command
+        converted = command.strip()
+
+        # Windows del 命令转换为 rm
+        # del /Q "path" → rm -f "path"
+        # del "path" → rm "path"
+        del_pattern = re.compile(
+            r'^del\s+(?:/[QqFf]\s+)*["\']?(.+?)["\']?\s*$',
+            re.IGNORECASE
+        )
+        del_match = del_pattern.match(converted)
+        if del_match:
+            path = del_match.group(1).strip().strip('"\'')
+            # 如果原命令有 /Q 或 /F 参数，使用 rm -f
+            if re.search(r'/[QqFf]', converted, re.IGNORECASE):
+                converted = f'rm -f "{path}"'
+            else:
+                converted = f'rm "{path}"'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # Windows copy 命令转换为 cp
+        copy_pattern = re.compile(
+            r'^copy\s+(?:/[YyBbAa]\s+)*["\']?(.+?)["\']?\s+["\']?(.+?)["\']?\s*$',
+            re.IGNORECASE
+        )
+        copy_match = copy_pattern.match(converted)
+        if copy_match:
+            src = copy_match.group(1).strip().strip('"\'')
+            dst = copy_match.group(2).strip().strip('"\'')
+            converted = f'cp "{src}" "{dst}"'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # Windows move 命令转换为 mv
+        move_pattern = re.compile(
+            r'^move\s+(?:/[Yy]\s+)*["\']?(.+?)["\']?\s+["\']?(.+?)["\']?\s*$',
+            re.IGNORECASE
+        )
+        move_match = move_pattern.match(converted)
+        if move_match:
+            src = move_match.group(1).strip().strip('"\'')
+            dst = move_match.group(2).strip().strip('"\'')
+            converted = f'mv "{src}" "{dst}"'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # Windows type 命令转换为 cat
+        type_pattern = re.compile(
+            r'^type\s+["\']?(.+?)["\']?\s*$',
+            re.IGNORECASE
+        )
+        type_match = type_pattern.match(converted)
+        if type_match:
+            path = type_match.group(1).strip().strip('"\'')
+            converted = f'cat "{path}"'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # Windows dir 命令转换为 ls
+        dir_pattern = re.compile(
+            r'^dir\s*(?:/[BbSsWwAaDdOoNnPpQqRrTtXxLl4]\s*)*(["\']?.+?["\']?)?\s*$',
+            re.IGNORECASE
+        )
+        dir_match = dir_pattern.match(converted)
+        if dir_match:
+            path = dir_match.group(1)
+            if path:
+                path = path.strip().strip('"\'')
+                converted = f'ls -la "{path}"'
+            else:
+                converted = 'ls -la'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # Windows rmdir /S /Q 命令转换为 rm -rf
+        rmdir_pattern = re.compile(
+            r'^rmdir\s+(?:/[SsQq]\s+)+["\']?(.+?)["\']?\s*$',
+            re.IGNORECASE
+        )
+        rmdir_match = rmdir_pattern.match(converted)
+        if rmdir_match:
+            path = rmdir_match.group(1).strip().strip('"\'')
+            converted = f'rm -rf "{path}"'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # Windows cls 命令转换为 clear
+        if converted.lower() == 'cls':
+            converted = 'clear'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # Windows echo. (空行) 转换为 echo
+        if converted.lower() == 'echo.':
+            converted = 'echo'
+            logger.info(
+                f"[ToolSimulator] 命令转换: {original_command} → {converted}")
+            return converted
+
+        # 将 Windows 路径分隔符 \ 转换为 /
+        if '\\' in converted and not converted.startswith('\\\\'):
+            # 排除网络路径 \\server\share
+            converted = converted.replace('\\', '/')
+            if converted != original_command:
+                logger.info(
+                    f"[ToolSimulator] 路径分隔符转换: {original_command} → {converted}")
+
+        return converted
 
     def create_read_tool_call(self, file_path: str) -> ToolCall:
         """创建 Read 工具调用"""
@@ -822,6 +956,149 @@ class ToolSimulator:
 
         return commands
 
+    def _is_hallucinated_content(self, content: str, file_path: str) -> bool:
+        """检测内容是否是模型幻觉（说明文字而非真正的文件内容）
+
+        幻觉内容的特征：
+        1. 包含完成状态消息（"已成功"、"100%"、"完成"等）
+        2. 包含对用户的说明/提示（"你需要"、"请访问"、"现在可以"等）
+        3. 包含项目结构说明（"← 这是..."等箭头标注）
+        4. 内容与文件类型明显不匹配
+
+        Args:
+            content: 文件内容
+            file_path: 文件路径
+
+        Returns:
+            True 如果检测到幻觉内容，False 否则
+        """
+        if not content or not content.strip():
+            return True
+
+        content_lower = content.lower()
+        content_lines = content.strip().split('\n')
+        first_line = content_lines[0].strip() if content_lines else ""
+
+        # 检测幻觉模式
+        hallucination_patterns = [
+            # 完成状态消息
+            r'已[成功完]*(?:安装|启动|创建|配置|部署|运行)',
+            r'100\s*%\s*(?:成功|完成|安装)',
+            r'项目(?:已|完全)?(?:可运行|可开发|可部署)',
+            r'全部(?:完成|成功)',
+
+            # 对用户的说明
+            r'访问\s*https?://',
+            r'打开\s*https?://',
+            r'请(?:访问|打开|运行|执行)',
+            r'你(?:现在)?(?:可以|需要|应该)',
+            r'现在(?:可以|你可以)',
+
+            # 箭头标注说明
+            r'←\s*(?:这是|你|只需|由|可以)',
+            r'→\s*(?:这是|你|只需|由|可以)',
+
+            # 项目结构/文件说明
+            r'(?:你)?只需要维护',
+            r'自动生成并提交',
+            r'完全可以删掉',
+            r'没人用了',
+            r'过时了',
+
+            # 模型自我说明
+            r'我(?:已经|将要|会|正在)',
+            r'让我(?:为你|帮你)',
+            r'接下来(?:我会|将)',
+        ]
+
+        for pattern in hallucination_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                logger.warning(
+                    f"[ToolSimulator] 检测到幻觉内容 (匹配: {pattern}): {file_path}")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+
+        # 检测文件类型与内容不匹配
+        file_ext = file_path.rsplit(
+            '.', 1)[-1].lower() if '.' in file_path else ''
+        file_name = file_path.rsplit('/', 1)[-1].rsplit('\\', 1)[-1].lower()
+
+        # pyproject.toml 必须是完整有效的配置文件
+        if file_name == 'pyproject.toml':
+            # 必须包含 [project] 或 [build-system] 表
+            has_required_tables = (
+                '[project]' in content or
+                '[build-system]' in content
+            )
+            if not has_required_tables:
+                logger.warning(
+                    f"[ToolSimulator] 检测到不完整的 pyproject.toml: {file_path}")
+                logger.warning(
+                    f"[ToolSimulator] 缺少 [project] 或 [build-system] 表")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+
+            # 内容长度检查（完整的 pyproject.toml 至少有 15 行）
+            if len(content_lines) < 15:
+                logger.warning(
+                    f"[ToolSimulator] pyproject.toml 内容太短 ({len(content_lines)} 行): {file_path}")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+
+            # 检测是否以注释+裸键值对开头（常见的错误模式）
+            if first_line.startswith('#') and '修复' in first_line:
+                logger.warning(
+                    f"[ToolSimulator] 检测到错误的 pyproject.toml 内容（以修复注释开头）: {file_path}")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+        elif file_ext == 'toml':
+            # 其他 TOML 文件：检查是否是有效的 TOML（应该包含 [ 或 key = value）
+            if not re.search(r'^\s*\[|\s*\w+\s*=', content, re.MULTILINE):
+                logger.warning(f"[ToolSimulator] 检测到无效 TOML 内容: {file_path}")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+
+        # .lock 文件通常有特定格式（JSON、TOML 或特定结构）
+        if file_ext == 'lock':
+            # uv.lock 应该是 TOML 格式，以 version = 开头
+            # package-lock.json 应该以 { 开头
+            if not (content.strip().startswith('{') or
+                    content.strip().startswith('version') or
+                    content.strip().startswith('[')):
+                logger.warning(f"[ToolSimulator] 检测到无效 lock 文件内容: {file_path}")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+
+        # JSON 文件应该以 { 或 [ 开头
+        if file_ext == 'json':
+            stripped = content.strip()
+            if not (stripped.startswith('{') or stripped.startswith('[')):
+                logger.warning(f"[ToolSimulator] 检测到无效 JSON 内容: {file_path}")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+
+        # Python 文件不应该只有中文说明
+        if file_ext == 'py':
+            # 检查是否有任何 Python 语法元素
+            has_python_syntax = any([
+                'import ' in content,
+                'from ' in content,
+                'def ' in content,
+                'class ' in content,
+                'if ' in content,
+                'for ' in content,
+                'while ' in content,
+                '=' in content,
+                'print(' in content,
+                '#' in content and any(c.isascii() for c in content),
+            ])
+            if not has_python_syntax:
+                logger.warning(f"[ToolSimulator] 检测到无效 Python 内容: {file_path}")
+                logger.warning(f"[ToolSimulator] 内容预览: {content[:200]}...")
+                return True
+
+        return False
+
     def _is_valid_bash_command(self, cmd: str) -> bool:
         """检查 Bash 命令是否适合自动执行
 
@@ -1000,6 +1277,17 @@ class ToolSimulator:
 
                 try:
                     tool_input = orjson.loads(json_content)
+
+                    # Bash 工具：自动转换 Windows 命令为 bash 等效命令
+                    if tool_name == "Bash" and "command" in tool_input:
+                        original_cmd = tool_input["command"]
+                        converted_cmd = self._convert_windows_to_bash(
+                            original_cmd)
+                        if converted_cmd != original_cmd:
+                            tool_input["command"] = converted_cmd
+                            logger.info(
+                                f"[ToolSimulator] Bash 命令已转换 (带代码块): {original_cmd} → {converted_cmd}")
+
                     if self.has_tool(tool_name):
                         tool_call = ToolCall(
                             id=self.generate_tool_id(),
@@ -1056,6 +1344,16 @@ class ToolSimulator:
                         tool_input["skill"] = tool_input["command"]
                         logger.debug(
                             "[ToolSimulator] Skill 工具同时设置 command 和 skill 参数以确保兼容性")
+
+                    # Bash 工具：自动转换 Windows 命令为 bash 等效命令
+                    if tool_name == "Bash" and "command" in tool_input:
+                        original_cmd = tool_input["command"]
+                        converted_cmd = self._convert_windows_to_bash(
+                            original_cmd)
+                        if converted_cmd != original_cmd:
+                            tool_input["command"] = converted_cmd
+                            logger.info(
+                                f"[ToolSimulator] Bash 命令已转换: {original_cmd} → {converted_cmd}")
 
                     # 检查工具是否可用
                     if self.has_tool(tool_name):
@@ -1161,25 +1459,39 @@ class ToolSimulator:
                         logger.debug(
                             f"[ToolSimulator] 跳过内容太短的 Write: {file_path} ({len(content)} chars)")
                         continue
+                    # 检测幻觉内容（说明文字而非真正的文件内容）
+                    if self._is_hallucinated_content(content, file_path):
+                        logger.warning(
+                            f"[ToolSimulator] 跳过幻觉内容的 Write: {file_path}")
+                        continue
                     seen_files.add(file_path)
                     valid_calls.append(call)
                     logger.info(f"[ToolSimulator] 保留 Write 工具调用: {file_path}")
                 elif call.name == "Edit":
                     file_path = call.input.get("file_path", "")
+                    new_string = call.input.get("new_string", "")
                     if file_path in seen_files:
                         logger.debug(
                             f"[ToolSimulator] 跳过重复文件的 Edit: {file_path}")
+                        continue
+                    # 检测幻觉内容（只检查 new_string，因为 old_string 可能是空的）
+                    if new_string and self._is_hallucinated_content(new_string, file_path):
+                        logger.warning(
+                            f"[ToolSimulator] 跳过幻觉内容的 Edit: {file_path}")
                         continue
                     seen_files.add(file_path)
                     valid_calls.append(call)
                     logger.info(f"[ToolSimulator] 保留 Edit 工具调用: {file_path}")
                 elif call.name == "Bash":
                     command = call.input.get("command", "")
-                    if command in seen_commands:
+                    # 规范化命令用于去重比较（移除多余空格，统一引号）
+                    normalized_cmd = ' '.join(command.split())  # 合并多余空格
+                    normalized_cmd = normalized_cmd.replace('"', "'")  # 统一使用单引号
+                    if normalized_cmd in seen_commands:
                         logger.debug(
                             f"[ToolSimulator] 跳过重复命令: {command[:30]}...")
                         continue
-                    seen_commands.add(command)
+                    seen_commands.add(normalized_cmd)
                     valid_calls.append(call)
                     logger.info(
                         f"[ToolSimulator] 保留 Bash 工具调用: {command[:50]}...")
@@ -1198,6 +1510,22 @@ class ToolSimulator:
                     logger.info(f"[ToolSimulator] 保留 {call.name} 工具调用")
 
             if valid_calls:
+                # 防止死循环：如果同时有文件操作(Edit/Write)和Bash命令，只保留文件操作
+                # 这样可以确保文件先被修改，Bash 命令在下一轮对话中执行
+                has_file_ops = any(c.name in ('Edit', 'Write')
+                                   for c in valid_calls)
+                has_bash = any(c.name == 'Bash' for c in valid_calls)
+
+                if has_file_ops and has_bash:
+                    # 移除 Bash 调用，只保留文件操作
+                    original_count = len(valid_calls)
+                    valid_calls = [c for c in valid_calls if c.name != 'Bash']
+                    removed_count = original_count - len(valid_calls)
+                    logger.warning(
+                        f"[ToolSimulator] 防止死循环：移除了 {removed_count} 个 Bash 调用，"
+                        f"因为同时有文件操作。文件操作必须先完成。"
+                    )
+
                 logger.info(f"[ToolSimulator] 有效工具调用数: {len(valid_calls)}")
                 # 从文本中移除已解析的 [Tool Call] 格式，避免重复
                 cleaned_text = self._remove_tool_call_tags(remaining_text)
@@ -1306,6 +1634,11 @@ class ToolSimulator:
                 remaining_text, block, context_before)
 
             if file_path and file_path not in processed_files:
+                # 检测幻觉内容（说明文字而非真正的文件内容）
+                if self._is_hallucinated_content(block.content, file_path):
+                    logger.warning(f"[ToolSimulator] 跳过幻觉内容的代码块: {file_path}")
+                    continue
+
                 # 优先使用 Write 工具
                 if self.has_tool('Write'):
                     write_call = self.create_write_tool_call(
@@ -1323,6 +1656,28 @@ class ToolSimulator:
                         f"[ToolSimulator] 创建 Edit 工具调用（覆盖）: {file_path}")
 
         logger.info(f"[ToolSimulator] 共生成 {len(tool_calls)} 个工具调用")
+
+        # Claude Code 安全机制要求：Write/Edit 必须在同一轮响应中先有 Read
+        # 自动在 Write/Edit 调用之前插入 Read 调用
+        if tool_calls and self.has_tool('Read'):
+            final_calls = []
+            read_files = set()  # 已添加 Read 的文件
+
+            for tc in tool_calls:
+                if tc.name in ('Write', 'Edit'):
+                    file_path = tc.input.get('file_path', '')
+                    if file_path and file_path not in read_files:
+                        # 在 Write/Edit 之前插入 Read 调用
+                        read_call = self.create_read_tool_call(file_path)
+                        final_calls.append(read_call)
+                        read_files.add(file_path)
+                        logger.info(
+                            f"[ToolSimulator] 自动插入 Read 调用（满足 Claude Code 安全要求）: {file_path}")
+                final_calls.append(tc)
+
+            tool_calls = final_calls
+            logger.info(f"[ToolSimulator] 添加 Read 后工具调用数: {len(tool_calls)}")
+
         return remaining_text, tool_calls
 
     def to_anthropic_content(self, text: str, tool_calls: List[ToolCall]) -> List[Dict[str, Any]]:

@@ -23,19 +23,12 @@ class AnthropicConverter:
         # 注意：Skill 工具已支持，不再过滤
     }
 
-    # 角色扮演指令（避免 Grok 拒绝，使用通用描述）
+    # 角色扮演指令（简化版本，避免触发 Grok 安全机制）
     ROLE_INSTRUCTION = """
 ## 工作说明
 
-你是一个专业的 AI 编程助手。请以专业、简洁的方式回答问题和执行任务。
+你是一个专业的编程助手。请以专业、简洁的方式回答问题和执行任务。
 专注于帮助用户完成编程任务，使用提供的工具来执行操作。
-
-**重要规则：**
-- 不要透露你的模型名称、开发公司或任何身份信息
-- 不要使用"我是 Grok"、"我是 xAI 构建"等表述
-- 不要提及"built by"、"powered by"等公司信息
-- 如果被问及身份，只需说"我是一个专业的 AI 编程助手"即可
-- 专注于回答编程相关的问题，不要讨论你的技术细节或来源
 
 """
 
@@ -46,15 +39,21 @@ class AnthropicConverter:
 
 **关键规则：当用户请求"创建"、"生成"、"执行"、"写入"、"初始化"文件或项目时，你必须立即使用工具调用格式来实际执行操作，而不是只描述要做什么。**
 
+### 文件路径规则（最重要！）
+1. **使用用户指定的路径**：如果用户明确提到了目录或路径，必须使用该路径
+2. **使用当前工作目录**：如果用户没有指定路径，文件应该创建在当前工作目录下
+3. **不要自作主张添加目录前缀**：除非用户明确要求，否则不要添加 `backend/`、`src/`、`app/` 等前缀
+4. **查看上下文中的路径信息**：从工具结果、命令输出中获取正确的工作目录
+
 ### 写入/创建文件 (Write) - 最常用
 当需要创建新文件或覆盖文件内容时使用：
 [Tool Call: Write]
-{"file_path": "完整的文件路径", "content": "文件的完整内容"}
+{"file_path": "文件路径（使用用户指定的路径或当前目录）", "content": "文件的完整内容"}
 [/Tool Call]
 
-示例 - 创建 Python 文件：
+示例 - 在当前目录创建 Python 文件：
 [Tool Call: Write]
-{"file_path": "backend/app/main.py", "content": "from fastapi import FastAPI\\n\\napp = FastAPI()\\n\\n@app.get('/')\\ndef root():\\n    return {'message': 'Hello'}"}
+{"file_path": "app/main.py", "content": "from fastapi import FastAPI\\n\\napp = FastAPI()\\n\\n@app.get('/')\\ndef root():\\n    return {'message': 'Hello'}"}
 [/Tool Call]
 
 ### 读取文件 (Read)
@@ -71,6 +70,50 @@ class AnthropicConverter:
 [Tool Call: Bash]
 {"command": "要执行的shell命令"}
 [/Tool Call]
+**重要：必须使用 bash/Unix 命令语法，不要使用 Windows CMD 命令！**
+- 删除文件用 `rm`，不要用 `del`
+- 复制文件用 `cp`，不要用 `copy`
+- 移动文件用 `mv`，不要用 `move`
+- 查看文件用 `cat`，不要用 `type`
+- 列出目录用 `ls`，不要用 `dir`
+- 路径分隔符用 `/`，不要用反斜杠
+
+## 错误处理规则（必须严格遵守）
+
+**🚨 最重要的规则 - 必须执行工具调用：**
+- **绝对不要只用文字描述操作结果**，必须实际生成 [Tool Call: ...] 格式的工具调用
+- **即使历史记录显示操作已完成**，也必须重新执行工具调用来验证
+- **删除文件必须使用 Bash 工具**：[Tool Call: Bash]{"command": "rm -f 文件路径"}[/Tool Call]
+- **绝不能说"已确认"或"已完成"而不提供实际的工具调用**
+
+**绝对禁止的行为：**
+1. **不要同时执行 Edit/Write 和 Bash**：必须先确认文件操作成功后，再单独执行 Bash 命令
+2. **不要假装操作成功**：如果工具返回错误（如 "File has been unexpectedly modified"、"Error"），必须承认失败并重新尝试
+3. **不要重复失败的操作**：如果同一个操作连续失败 2 次，应该换一种方法或询问用户
+4. **不要伪造日志输出**：绝对不要编造 uvicorn、npm、uv 或任何命令的输出。只有 [Tool Result] 中的内容才是真实的
+5. **不要写入不完整的配置文件**：pyproject.toml 必须包含 [project] 和 [build-system] 等完整内容
+6. **不要基于历史记录声称操作完成**：每个用户请求都必须生成新的工具调用
+
+**工具结果是唯一真实来源：**
+- 你的工具调用会产生 [Tool Result] 反馈
+- **空的 [Tool Result] 表示命令执行成功**（如 rm、mkdir 等命令成功时不产生输出）
+- 如果 [Tool Result] 显示 "Error" 或 "Exit code" 非 0，操作就是失败的
+- 不要在收到 [Tool Result] 之前声称操作成功
+- 不要编造类似 "INFO: Uvicorn running on..." 这样的虚假输出
+- **收到 [Tool Result] 后，不要重复执行相同的工具调用，直接告诉用户操作已完成**
+
+**正确的工作流程：**
+1. 先用 Read 读取文件
+2. 用 Edit 或 Write 修改文件（单独一个工具调用）
+3. 等待 [Tool Result] 并确认文件操作成功（没有 Error）
+4. 如果成功，然后再用 Bash 执行命令（单独一个工具调用）
+5. 如果任何步骤失败，立即停止并向用户报告实际的错误信息
+
+**🚨 关于工具结果的重要理解：**
+- 当你在对话历史中看到 [Tool Result]...[/Tool Result]，这表示工具**已经被执行**
+- **绝对不要再次执行相同的工具调用**
+- 如果 [Tool Result] 是空的或只有 (No content)，这表示命令**成功执行**
+- 看到工具结果后，你应该**总结操作结果**并询问用户下一步，而不是重复执行
 
 ### 搜索文件内容 (Grep)
 [Tool Call: Grep]
@@ -95,6 +138,121 @@ class AnthropicConverter:
 5. 每个文件都需要单独的 [Tool Call: Write] 调用
 6. 先创建目录结构所需的文件，而不是描述它们
 """
+
+    # 危险关键词列表（如果清理后仍包含这些词，将使用安全模式）
+    # 注意：只包含真正会触发 Grok 安全机制的词语
+    DANGEROUS_KEYWORDS = [
+        'claude code', 'claude opus', 'claude sonnet',  # 具体的 Claude 模型名
+        'anthropic', 'openai',  # 公司名
+        'simulate a different ai', 'impersonate',  # 明确的角色扮演
+        'override my core', 'override instructions',  # 覆盖指令
+    ]
+
+    @classmethod
+    def _clean_system_prompt(cls, system_text: str) -> str:
+        """清理系统提示词，移除会导致 Grok 拒绝的内容
+
+        采用激进清理策略：
+        1. 首先尝试移除已知的危险模式
+        2. 如果清理后仍包含危险关键词，则只提取安全的上下文信息
+        """
+        import re
+
+        if not system_text:
+            return ""
+
+        # 要移除的模式列表（触发 Grok "simulate AI system" 安全机制）
+        patterns_to_remove = [
+            # Claude/AI 身份声明
+            r"You are Claude[^\n]*",
+            r"I am Claude[^\n]*",
+            r"As Claude[^\n]*",
+            r"Claude Code[^\n]*",
+            r"Claude Opus[^\n]*",
+            r"Claude Sonnet[^\n]*",
+            # Anthropic/OpenAI 公司相关
+            r"Anthropic[^\n]*",
+            r"OpenAI[^\n]*",
+            r"official CLI[^\n]*",
+            r"built by[^\n]*",
+            r"developed by[^\n]*",
+            r"created by[^\n]*",
+            # 模型身份声明
+            r"You are powered by[^\n]*",
+            r"powered by the model[^\n]*",
+            r"model.{0,20}grok[^\n]*",
+            # 角色扮演/覆盖指令
+            r"You must act as[^\n]*",
+            r"Pretend you are[^\n]*",
+            r"simulate[^\n]*AI[^\n]*",
+            r"override[^\n]*instructions[^\n]*",
+            r"OVERRIDE[^\n]*",
+            r"act as a different[^\n]*",
+            r"impersonate[^\n]*",
+            r"role-?play[^\n]*",
+            # 完整移除的块
+            r"<claude_background_info>[\s\S]*?</claude_background_info>",
+            r"<claude_info>[\s\S]*?</claude_info>",
+        ]
+
+        cleaned = system_text
+        for pattern in patterns_to_remove:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+        # 清理多余的空行
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        cleaned = cleaned.strip()
+
+        # 二次检查：如果清理后仍包含危险关键词，提取安全上下文
+        lower_cleaned = cleaned.lower()
+        has_dangerous = any(
+            kw in lower_cleaned for kw in cls.DANGEROUS_KEYWORDS)
+
+        if has_dangerous:
+            logger.warning(f"[Anthropic] 清理后仍包含危险关键词，切换到安全模式")
+            # 只提取安全的上下文信息
+            safe_content = cls._extract_safe_context(system_text)
+            return safe_content
+
+        return cleaned
+
+    @classmethod
+    def _extract_safe_context(cls, system_text: str) -> str:
+        """从系统提示词中提取安全的上下文信息（工作目录、文件路径等）"""
+        import re
+
+        safe_parts = []
+
+        # 提取工作目录信息
+        cwd_match = re.search(r'Working directory:\s*([^\n]+)', system_text)
+        if cwd_match:
+            safe_parts.append(f"Working directory: {cwd_match.group(1)}")
+
+        # 提取环境信息块
+        env_match = re.search(r'<env>([\s\S]*?)</env>', system_text)
+        if env_match:
+            env_content = env_match.group(1).strip()
+            # 过滤掉包含危险词的行
+            safe_env_lines = []
+            for line in env_content.split('\n'):
+                lower_line = line.lower()
+                if not any(kw in lower_line for kw in cls.DANGEROUS_KEYWORDS):
+                    safe_env_lines.append(line)
+            if safe_env_lines:
+                safe_parts.append("Environment:\n" + '\n'.join(safe_env_lines))
+
+        # 提取 Git 状态信息
+        git_match = re.search(r'gitStatus:[\s\S]*?(?=\n\n|\Z)', system_text)
+        if git_match:
+            git_content = git_match.group(0)
+            # 过滤危险内容
+            if not any(kw in git_content.lower() for kw in cls.DANGEROUS_KEYWORDS):
+                safe_parts.append(git_content[:500])  # 限制长度
+
+        if safe_parts:
+            return "Context information:\n\n" + "\n\n".join(safe_parts)
+
+        return ""
 
     @classmethod
     def _extract_system_content(cls, system: Any) -> str:
@@ -217,27 +375,30 @@ class AnthropicConverter:
         logger.info(
             f"[Anthropic] 原始请求中的 system 字段: {system} (类型: {type(system)})")
 
-        # 完全忽略 Claude Code 的系统提示词，使用我们自己的安全提示词
-        # Grok 会拒绝扮演其他 AI 的身份，所以我们需要完全替换系统提示词
-        # 而不是尝试清理，因为清理可能不彻底
+        # 智能处理 Claude Code 的系统提示词：
+        # 1. 移除会导致 Grok 拒绝的身份相关内容（"You are Claude Code..."）
+        # 2. 保留重要的上下文信息（工作目录、文件路径、任务指令等）
         system_content = ""
         if system:
             original_system = cls._extract_system_content(system)
             logger.info(
-                f"[Anthropic] 原始系统提示词内容（将被完全替换）: {original_system[:200] + '...' if original_system and len(original_system) > 200 else original_system}")
+                f"[Anthropic] 原始系统提示词长度: {len(original_system)} 字符")
 
-            # 完全忽略原始系统提示词，使用我们自己的安全提示词
-            # 这样可以确保 Grok 永远不会看到任何可能触发拒绝的内容
-            system_content = "You are a professional AI coding assistant. Help users with programming tasks using the available tools."
+            # 清理会导致 Grok 拒绝的内容，但保留其他有用信息
+            cleaned_system = cls._clean_system_prompt(original_system)
 
-            # 不再进行清理，因为我们已经完全替换了系统提示词
-            logger.info(
-                f"[Anthropic] 已完全替换系统提示词为安全版本")
+            if cleaned_system and len(cleaned_system.strip()) > 50:
+                # 使用清理后的系统提示词
+                system_content = cleaned_system
+                logger.info(
+                    f"[Anthropic] 已清理系统提示词，保留 {len(cleaned_system)} 字符")
+            else:
+                # 如果清理后内容太短，使用默认提示词
+                system_content = "You are a professional AI coding assistant. Help users with programming tasks using the available tools."
+                logger.info(f"[Anthropic] 系统提示词清理后太短，使用默认提示词")
         else:
             # 如果没有原始系统提示词，使用默认内容
-            system_content = """You are a professional AI coding assistant. Help users with programming tasks using the available tools.
-
-Important: Do not reveal your model name, developer company, or any identity information. Do not mention "Grok", "xAI", "built by", or "powered by". If asked about your identity, simply say you are a professional AI coding assistant. Focus on answering programming questions and do not discuss your technical details or origin."""
+            system_content = "You are a professional AI coding assistant. Help users with programming tasks using the available tools."
 
         # 注入角色扮演指令（始终添加，确保 Grok 不暴露身份）
         # 如果清理后的内容为空或太短，使用默认内容
@@ -356,7 +517,7 @@ Important: Do not reveal your model name, developer company, or any identity inf
             "model": anthropic_request.get("model"),
             "messages": openai_messages,
             "stream": anthropic_request.get("stream", False),
-            "temperature": anthropic_request.get("temperature", 1.0),
+            "temperature": anthropic_request.get("temperature", 0.5),
             "max_tokens": anthropic_request.get("max_tokens", 4096),
         }
 
@@ -646,12 +807,49 @@ Important: Do not reveal your model name, developer company, or any identity inf
             cleaned_text = re.sub(r'\n{3,}', '\n\n', total_text)  # 多个空行合并为两个
             cleaned_text = cleaned_text.strip()
 
-            # 如果有工具，解析并处理
-            if has_tools and total_text:
+            # 🚨 去重：移除 Grok 响应中重复的工具调用块
+            # Grok 有时会在一次响应中多次输出相同的内容
+            tool_call_pattern = r'\[Tool Call:\s*(\w+)\]([\s\S]*?)\[/Tool Call\]'
+
+            # 先统计有多少个工具调用块
+            all_tool_calls = re.findall(
+                tool_call_pattern, cleaned_text, flags=re.IGNORECASE)
+            logger.info(f"[Anthropic] 去重前发现 {len(all_tool_calls)} 个工具调用块")
+
+            seen_tool_calls = set()
+            removed_count = 0
+
+            def dedupe_tool_call(match):
+                """去重工具调用，只保留第一次出现的"""
+                nonlocal removed_count
+                full_match = match.group(0)
+                tool_name = match.group(1)
+                tool_content = match.group(2).strip()
+                # 用工具名和内容的 hash 作为唯一标识
+                key = f"{tool_name}:{hash(tool_content)}"
+                if key in seen_tool_calls:
+                    removed_count += 1
+                    logger.warning(
+                        f"[Anthropic] 移除重复的工具调用 #{removed_count}: {tool_name}")
+                    return ""  # 移除重复的
+                seen_tool_calls.add(key)
+                return full_match  # 保留第一次出现的
+
+            cleaned_text = re.sub(
+                tool_call_pattern, dedupe_tool_call, cleaned_text, flags=re.IGNORECASE)
+
+            if removed_count > 0:
+                logger.info(f"[Anthropic] 去重完成，移除了 {removed_count} 个重复工具调用")
+
+            cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)  # 再次清理空行
+            cleaned_text = cleaned_text.strip()
+
+            # 如果有工具，解析并处理（使用去重后的 cleaned_text）
+            if has_tools and cleaned_text:
                 try:
                     simulator = ToolSimulator(available_tools)
                     cleaned_text, tool_calls = simulator.parse_response(
-                        total_text)
+                        cleaned_text)  # 🚨 重要：使用去重后的文本！
 
                     if tool_calls:
                         stop_reason = "tool_use"
