@@ -141,7 +141,6 @@ class GrokResponseProcessor:
         is_image = False
         is_thinking = False
         thinking_finished = False
-        chunk_index = 0
         model = None
         filtered_tags = setting.grok_config.get("filtered_tags", "").split(",")
         video_progress_started = False
@@ -163,7 +162,7 @@ class GrokResponseProcessor:
                 created=int(time.time()),
                 model=model or "grok-4-mini-thinking-tahoe",
                 choices=[OpenAIChatCompletionChunkChoice(
-                    index=chunk_index,
+                    index=0,
                     delta=OpenAIChatCompletionChunkMessage(
                         role="assistant",
                         content=content
@@ -229,21 +228,19 @@ class GrokResponseProcessor:
                             last_video_progress = progress
                             if show_thinking:
                                 if not video_progress_started:
-                                    content = f"<think>视频已生成{progress}%\\n"
+                                    content = f"<think>视频已生成{progress}%\n"
                                     video_progress_started = True
                                 elif progress < 100:
-                                    content = f"视频已生成{progress}%\\n"
+                                    content = f"视频已生成{progress}%\n"
                                 else:
-                                    content = f"视频已生成{progress}%</think>\\n"
+                                    content = f"视频已生成{progress}%</think>\n"
                                 yield make_chunk(content)
-                                chunk_index += 1
                         
                         # 视频URL
                         if v_url:
                             logger.debug("[Processor] 视频生成完成")
                             video_content = await GrokResponseProcessor._build_video_content(v_url, auth_token)
                             yield make_chunk(video_content)
-                            chunk_index += 1
                         
                         continue
 
@@ -270,38 +267,31 @@ class GrokResponseProcessor:
                                                 parts = base64_str.split(",", 1)
                                                 if len(parts) == 2:
                                                     yield make_chunk(f"![Generated Image](data:{parts[0]},")
-                                                    chunk_index += 1
                                                     # 8KB分块
                                                     for i in range(0, len(parts[1]), 8192):
                                                         yield make_chunk(parts[1][i:i+8192])
-                                                        chunk_index += 1
-                                                    yield make_chunk(")\\n")
-                                                    chunk_index += 1
+                                                    yield make_chunk(")\n")
                                                 else:
-                                                    yield make_chunk(f"![Generated Image]({base64_str})\\n")
-                                                    chunk_index += 1
+                                                    yield make_chunk(f"![Generated Image]({base64_str})\n")
                                             else:
-                                                yield make_chunk(f"![Generated Image]({base64_str})\\n")
-                                                chunk_index += 1
+                                                yield make_chunk(f"![Generated Image]({base64_str})\n")
                                         else:
-                                            yield make_chunk(f"![Generated Image](https://assets.grok.com/{img})\\n")
-                                            chunk_index += 1
+                                            yield make_chunk(f"![Generated Image](https://assets.grok.com/{img})\n")
                                     else:
                                         # URL模式
                                         await image_cache_service.download_image(f"/{img}", auth_token)
                                         img_path = img.replace('/', '-')
                                         base_url = setting.global_config.get("base_url", "")
                                         img_url = f"{base_url}/images/{img_path}" if base_url else f"/images/{img_path}"
-                                        content += f"![Generated Image]({img_url})\\n"
+                                        content += f"![Generated Image]({img_url})\n"
                                 except Exception as e:
                                     logger.warning(f"[Processor] 处理图片失败: {e}")
-                                    content += f"![Generated Image](https://assets.grok.com/{img})\\n"
+                                    content += f"![Generated Image](https://assets.grok.com/{img})\n"
 
                             yield make_chunk(content.strip(), "stop")
                             return
                         elif token:
                             yield make_chunk(token)
-                            chunk_index += 1
 
                     # 对话处理
                     else:
@@ -326,9 +316,9 @@ class GrokResponseProcessor:
                                             title = result.get("title", "")
                                             url = result.get("url", "")
                                             preview = result.get("preview", "")
-                                            preview_clean = preview.replace("\\n", "") if isinstance(preview, str) else ""
-                                            token += f'\\n- [{title}]({url} "{preview_clean}")'
-                                        token += "\\n"
+                                            preview_clean = preview.replace("\n", "") if isinstance(preview, str) else ""
+                                            token += f'\n- [{title}]({url} "{preview_clean}")'
+                                        token += "\n"
                                     else:
                                         continue
                                 else:
@@ -346,12 +336,12 @@ class GrokResponseProcessor:
                             should_skip = False
                             if not is_thinking and current_is_thinking:
                                 if show_thinking:
-                                    content = f"<think>\\n{content}"
+                                    content = f"<think>\n{content}"
                                 else:
                                     should_skip = True
                             elif is_thinking and not current_is_thinking:
                                 if show_thinking:
-                                    content = f"\\n</think>\\n{content}"
+                                    content = f"\n</think>\n{content}"
                                 thinking_finished = True
                             elif current_is_thinking:
                                 if not show_thinking:
@@ -359,7 +349,6 @@ class GrokResponseProcessor:
 
                             if not should_skip:
                                 yield make_chunk(content)
-                                chunk_index += 1
                             
                             is_thinking = current_is_thinking
 
@@ -399,17 +388,11 @@ class GrokResponseProcessor:
                 video_path = video_url.replace('/', '-')
                 base_url = setting.global_config.get("base_url", "")
                 local_url = f"{base_url}/images/{video_path}" if base_url else f"/images/{video_path}"
-                # 返回包含视频 URL 的内容，方便提取
-                video_html = f'<video src="{local_url}" controls="controls" width="500" height="300"></video>'
-                video_url_text = f"\n\n视频地址: {local_url}\n原始地址: {full_url}"
-                return f"{video_html}{video_url_text}\\n"
+                return f'<video src="{local_url}" controls="controls" width="500" height="300"></video>\n'
         except Exception as e:
             logger.warning(f"[Processor] 缓存视频失败: {e}")
         
-        # 如果没有本地缓存，返回原始 URL
-        video_html = f'<video src="{full_url}" controls="controls" width="500" height="300"></video>'
-        video_url_text = f"\n\n视频地址: {full_url}"
-        return f"{video_html}{video_url_text}\\n"
+        return f'<video src="{full_url}" controls="controls" width="500" height="300"></video>\n'
 
     @staticmethod
     async def _append_images(content: str, images: list, auth_token: str) -> str:
@@ -421,21 +404,21 @@ class GrokResponseProcessor:
                 if image_mode == "base64":
                     base64_str = await image_cache_service.download_base64(f"/{img}", auth_token)
                     if base64_str:
-                        content += f"\\n![Generated Image]({base64_str})"
+                        content += f"\n![Generated Image]({base64_str})"
                     else:
-                        content += f"\\n![Generated Image](https://assets.grok.com/{img})"
+                        content += f"\n![Generated Image](https://assets.grok.com/{img})"
                 else:
                     cache_path = await image_cache_service.download_image(f"/{img}", auth_token)
                     if cache_path:
                         img_path = img.replace('/', '-')
                         base_url = setting.global_config.get("base_url", "")
                         img_url = f"{base_url}/images/{img_path}" if base_url else f"/images/{img_path}"
-                        content += f"\\n![Generated Image]({img_url})"
+                        content += f"\n![Generated Image]({img_url})"
                     else:
-                        content += f"\\n![Generated Image](https://assets.grok.com/{img})"
+                        content += f"\n![Generated Image](https://assets.grok.com/{img})"
             except Exception as e:
                 logger.warning(f"[Processor] 处理图片失败: {e}")
-                content += f"\\n![Generated Image](https://assets.grok.com/{img})"
+                content += f"\n![Generated Image](https://assets.grok.com/{img})"
         
         return content
 
