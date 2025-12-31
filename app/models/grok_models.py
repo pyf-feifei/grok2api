@@ -140,23 +140,23 @@ class Models(Enum):
     def is_valid_model(cls, model: str) -> bool:
         """检查模型是否有效"""
         return model in _MODEL_CONFIG
-    
+
     @classmethod
     def to_grok(cls, model: str) -> Tuple[str, str]:
         """转换为Grok内部模型名和模式
-        
+
         Returns:
             (模型名, 模式类型) 元组
         """
         config = _MODEL_CONFIG.get(model)
         return config["grok_model"] if config else (model, "MODEL_MODE_FAST")
-    
+
     @classmethod
     def to_rate_limit(cls, model: str) -> str:
         """转换为速率限制模型名"""
         config = _MODEL_CONFIG.get(model)
         return config["rate_limit_model"] if config else model
-    
+
     @classmethod
     def get_all_model_names(cls) -> list[str]:
         """获取所有模型名称"""

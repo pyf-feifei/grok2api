@@ -83,7 +83,7 @@ class ConfigManager:
     def load(self, section: Literal["global", "grok"]) -> Dict[str, Any]:
         """加载配置节"""
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(self.config_path, "r", encoding="utf-8-sig") as f:
                 config = toml.load(f)[section]
 
             # 标准化Grok配置
