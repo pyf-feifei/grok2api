@@ -289,7 +289,8 @@ class AnthropicConverter:
         openai_messages = []
 
         # 检查是否有工具列表（需要注入工具格式说明）
-        tools = anthropic_request.get("tools", [])
+        # 使用 or [] 确保即使 tools 显式设置为 None 也能正常工作
+        tools = anthropic_request.get("tools") or []
 
         # 检测并处理 Skill 工具（需要注入技能列表到系统提示词）
         skill_tool = None

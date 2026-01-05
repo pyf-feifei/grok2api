@@ -1288,6 +1288,14 @@ class ToolSimulator:
                             logger.info(
                                 f"[ToolSimulator] Bash 命令已转换 (带代码块): {original_cmd} → {converted_cmd}")
 
+                    # TodoWrite 工具：Claude Code 要求每个 todo 必须有 activeForm 字段
+                    if tool_name == "TodoWrite" and "todos" in tool_input:
+                        for todo in tool_input["todos"]:
+                            if isinstance(todo, dict) and "activeForm" not in todo:
+                                todo["activeForm"] = "checkbox"
+                        logger.info(
+                            f"[ToolSimulator] TodoWrite 工具已补充 activeForm 字段 (带代码块)")
+
                     if self.has_tool(tool_name):
                         tool_call = ToolCall(
                             id=self.generate_tool_id(),
@@ -1344,6 +1352,32 @@ class ToolSimulator:
                         tool_input["skill"] = tool_input["command"]
                         logger.debug(
                             "[ToolSimulator] Skill 工具同时设置 command 和 skill 参数以确保兼容性")
+
+                    # Task 工具：Grok 可能使用 prompt 参数，但 Claude Code 期望 description
+                    if tool_name == "Task":
+                        # 如果有 prompt 但没有 description，转换参数名
+                        if "prompt" in tool_input and "description" not in tool_input:
+                            tool_input["description"] = tool_input.pop("prompt")
+                            logger.info(
+                                "[ToolSimulator] Task 工具参数转换: prompt → description")
+                        # 如果既没有 prompt 也没有 description，尝试使用其他可能的字段
+                        elif "description" not in tool_input:
+                            # 尝试从其他字段提取描述
+                            possible_fields = ["task", "content", "message", "query"]
+                            for field in possible_fields:
+                                if field in tool_input:
+                                    tool_input["description"] = tool_input.pop(field)
+                                    logger.info(
+                                        f"[ToolSimulator] Task 工具参数转换: {field} → description")
+                                    break
+
+                    # TodoWrite 工具：Claude Code 要求每个 todo 必须有 activeForm 字段
+                    if tool_name == "TodoWrite" and "todos" in tool_input:
+                        for todo in tool_input["todos"]:
+                            if isinstance(todo, dict) and "activeForm" not in todo:
+                                todo["activeForm"] = "checkbox"  # 默认使用 checkbox
+                        logger.info(
+                            f"[ToolSimulator] TodoWrite 工具已补充 activeForm 字段")
 
                     # Bash 工具：自动转换 Windows 命令为 bash 等效命令
                     if tool_name == "Bash" and "command" in tool_input:
