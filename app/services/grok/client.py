@@ -26,7 +26,7 @@ MAX_UPLOADS = 20  # 提高并发上传限制以支持更高并发
 
 class GrokClient:
     """Grok API 客户端"""
-    
+
     _upload_sem = None  # 延迟初始化
 
     @staticmethod
@@ -34,7 +34,8 @@ class GrokClient:
         """获取上传信号量（动态配置）"""
         if GrokClient._upload_sem is None:
             # 从配置读取，如果不可用则使用默认值
-            max_concurrency = setting.global_config.get("max_upload_concurrency", MAX_UPLOADS)
+            max_concurrency = setting.global_config.get(
+                "max_upload_concurrency", MAX_UPLOADS)
             GrokClient._upload_sem = asyncio.Semaphore(max_concurrency)
             logger.debug(f"[Client] 初始化上传并发限制: {max_concurrency}")
         return GrokClient._upload_sem
@@ -54,39 +55,46 @@ class GrokClient:
             content = msg.get('content', '')
             if isinstance(content, str):
                 # 截断过长的内容
-                content_preview = content[:500] + "..." if len(content) > 500 else content
+                content_preview = content[:500] + \
+                    "..." if len(content) > 500 else content
                 logger.info(f"[Client]   [{idx}] {role}: {content_preview}")
             elif isinstance(content, list):
-                logger.info(f"[Client]   [{idx}] {role}: [多部分内容，共{len(content)}项]")
+                logger.info(
+                    f"[Client]   [{idx}] {role}: [多部分内容，共{len(content)}项]")
                 for part_idx, part in enumerate(content):
                     part_type = part.get('type', 'unknown')
                     if part_type == 'text':
-                        text_preview = part.get('text', '')[:200] + "..." if len(part.get('text', '')) > 200 else part.get('text', '')
-                        logger.info(f"[Client]     - {part_type}: {text_preview}")
+                        text_preview = part.get('text', '')[
+                            :200] + "..." if len(part.get('text', '')) > 200 else part.get('text', '')
+                        logger.info(
+                            f"[Client]     - {part_type}: {text_preview}")
                     elif part_type == 'image_url':
-                        img_url = part.get('image_url', {}).get('url', '')[:100] + "..." if len(part.get('image_url', {}).get('url', '')) > 100 else part.get('image_url', {}).get('url', '')
+                        img_url = part.get('image_url', {}).get('url', '')[:100] + "..." if len(part.get(
+                            'image_url', {}).get('url', '')) > 100 else part.get('image_url', {}).get('url', '')
                         logger.info(f"[Client]     - {part_type}: {img_url}")
             else:
                 logger.info(f"[Client]   [{idx}] {role}: {type(content)}")
         logger.info("=" * 80)
-        
+
         model = request["model"]
         content, images, system_prompt = GrokClient._extract_content(
             request["messages"])
-        
+
         # 打印提取后的内容
         logger.info("[Client] ========== 提取后的内容 ==========")
         logger.info(f"[Client] 合并后的文本内容长度: {len(content)} 字符")
-        content_preview = content[:1000] + "..." if len(content) > 1000 else content
+        content_preview = content[:1000] + \
+            "..." if len(content) > 1000 else content
         logger.info(f"[Client] 合并后的文本内容预览: {content_preview}")
         logger.info(f"[Client] 图片数量: {len(images)}")
         if images:
             for idx, img in enumerate(images):
                 img_preview = img[:100] + "..." if len(img) > 100 else img
                 logger.info(f"[Client]   [{idx}] {img_preview}")
-        logger.info(f"[Client] 系统提示词: {system_prompt[:200] + '...' if system_prompt and len(system_prompt) > 200 else system_prompt}")
+        logger.info(
+            f"[Client] 系统提示词: {system_prompt[:200] + '...' if system_prompt and len(system_prompt) > 200 else system_prompt}")
         logger.info("=" * 80)
-        
+
         stream = request.get("stream", False)
         aspect_ratio = request.get("aspect_ratio")
         # 优先使用 duration（OpenAI 官方格式），如果没有则使用 video_length（兼容）
@@ -97,7 +105,8 @@ class GrokClient:
         # 获取模型信息
         info = Models.get_model_info(model)
         grok_model, mode = Models.to_grok(model)
-        is_video = info.get("is_video_model", False) and not force_disable_video
+        is_video = info.get(
+            "is_video_model", False) and not force_disable_video
 
         # 视频模型支持多张图片（不再限制为1张）
         if is_video and len(images) > 1:
@@ -118,11 +127,13 @@ class GrokClient:
                 # 视频模型创建会话（为所有图片创建 post，但只使用第一个作为 parentPostId）
                 post_ids = []
                 if is_video and img_ids and img_uris:
-                    logger.info(f"[Client] ========== 开始为 {len(images)} 张图片创建 post ==========")
+                    logger.info(
+                        f"[Client] ========== 开始为 {len(images)} 张图片创建 post ==========")
                     for idx, (img_id, img_uri) in enumerate(zip(img_ids, img_uris)):
                         # 获取对应的原始图片 URL
-                        original_url = images[idx] if idx < len(images) else "未知"
-                        
+                        original_url = images[idx] if idx < len(
+                            images) else "未知"
+
                         post_id = await GrokClient._create_post(img_id, img_uri, token)
                         if post_id:
                             post_ids.append(post_id)
@@ -135,13 +146,17 @@ class GrokClient:
                                 frame_type = "尾帧"
                             else:
                                 frame_type = f"第{idx+1}帧"
-                            
+
                             # 截断过长的 URL
-                            url_preview = original_url[:100] + "..." if len(original_url) > 100 else original_url
-                            logger.info(f"[Client] {frame_type} - Post ID: {post_id}")
-                            logger.info(f"[Client] {frame_type} - 图片 URL: {url_preview}")
-                    
-                    logger.info(f"[Client] 为 {len(img_ids)} 张图片创建了 {len(post_ids)} 个 post")
+                            url_preview = original_url[:100] + "..." if len(
+                                original_url) > 100 else original_url
+                            logger.info(
+                                f"[Client] {frame_type} - Post ID: {post_id}")
+                            logger.info(
+                                f"[Client] {frame_type} - 图片 URL: {url_preview}")
+
+                    logger.info(
+                        f"[Client] 为 {len(img_ids)} 张图片创建了 {len(post_ids)} 个 post")
                     if len(post_ids) >= 2:
                         logger.info(f"[Client] ========== 首尾帧对应关系 ==========")
                         logger.info(f"[Client] 首帧 Post ID: {post_ids[0]}")
@@ -164,8 +179,9 @@ class GrokClient:
                     raise
 
                 status = e.context.get("status") if e.context else None
-                retry_codes = setting.grok_config.get("retry_status_codes", [401, 429])
-                
+                retry_codes = setting.grok_config.get(
+                    "retry_status_codes", [401, 429])
+
                 if status not in retry_codes:
                     raise
 
@@ -188,21 +204,24 @@ class GrokClient:
         for idx, msg in enumerate(messages):
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            logger.debug(f"[Client] 消息 [{idx}] role={role}, content类型={type(content)}, content长度={len(str(content)) if content else 0}")
+            logger.debug(
+                f"[Client] 消息 [{idx}] role={role}, content类型={type(content)}, content长度={len(str(content)) if content else 0}")
 
             # 提取系统提示词（只取第一个 system 消息）
             if role == "system" and system_prompt is None:
                 logger.info(f"[Client] 发现系统消息，开始提取系统提示词")
                 if isinstance(content, str):
                     system_prompt = content
-                    logger.info(f"[Client] 系统提示词（字符串）: {system_prompt[:200] + '...' if len(system_prompt) > 200 else system_prompt}")
+                    logger.info(
+                        f"[Client] 系统提示词（字符串）: {system_prompt[:200] + '...' if len(system_prompt) > 200 else system_prompt}")
                 elif isinstance(content, list):
                     # 系统提示词通常只有文本，但也要处理列表格式
                     logger.info(f"[Client] 系统提示词是列表格式，包含 {len(content)} 项")
                     for item_idx, item in enumerate(content):
                         if item.get("type") == "text":
                             system_prompt = item.get("text", "")
-                            logger.info(f"[Client] 从列表项 [{item_idx}] 提取系统提示词: {system_prompt[:200] + '...' if len(system_prompt) > 200 else system_prompt}")
+                            logger.info(
+                                f"[Client] 从列表项 [{item_idx}] 提取系统提示词: {system_prompt[:200] + '...' if len(system_prompt) > 200 else system_prompt}")
                             break
                     if not system_prompt:
                         logger.warning(f"[Client] 系统消息是列表格式但未找到 text 类型的内容")
@@ -280,7 +299,7 @@ class GrokClient:
                 # 如果没有 post_ids，使用 assets.grok.com/post/{uri} 格式
                 for img_uri in img_uris:
                     img_urls.append(f"https://assets.grok.com/post/{img_uri}")
-            
+
             # 将所有图片 URL 用空格连接
             img_msg = " ".join(img_urls)
 
@@ -325,27 +344,36 @@ class GrokClient:
                 payload["responseMetadata"] = response_metadata
 
             # 打印视频模型的 payload
-            logger.info("[Client] ========== 处理后发送给 Grok API 的内容 (视频模型) ==========")
+            logger.info(
+                "[Client] ========== 处理后发送给 Grok API 的内容 (视频模型) ==========")
             logger.info(f"[Client] 接口: {API_ENDPOINT}")
             logger.info(f"[Client] 模型: {payload.get('modelName')}")
             logger.info(f"[Client] 消息长度: {len(payload.get('message', ''))} 字符")
-            message_preview = payload.get('message', '')[:1000] + "..." if len(payload.get('message', '')) > 1000 else payload.get('message', '')
+            message_preview = payload.get('message', '')[:1000] + "..." if len(
+                payload.get('message', '')) > 1000 else payload.get('message', '')
             logger.info(f"[Client] 消息内容预览: {message_preview}")
-            logger.info(f"[Client] 文件附件数量: {len(payload.get('fileAttachments', []))}")
+            logger.info(
+                f"[Client] 文件附件数量: {len(payload.get('fileAttachments', []))}")
             if payload.get('fileAttachments'):
                 for idx, fid in enumerate(payload.get('fileAttachments', [])):
-                    frame_type = "首帧" if idx == 0 else f"第{idx+1}帧" if idx < len(payload.get('fileAttachments', [])) - 1 else "尾帧"
-                    logger.info(f"[Client]   [{idx}] {frame_type} - 文件ID: {fid}")
-            
+                    frame_type = "首帧" if idx == 0 else f"第{idx+1}帧" if idx < len(
+                        payload.get('fileAttachments', [])) - 1 else "尾帧"
+                    logger.info(
+                        f"[Client]   [{idx}] {frame_type} - 文件ID: {fid}")
+
             # 显示首尾帧对应关系
             if post_ids and len(post_ids) >= 2:
                 logger.info(f"[Client] ========== 首尾帧对应关系 ==========")
-                logger.info(f"[Client] 首帧 Post ID: {post_ids[0]} (对应 message 中第一个图片 URL)")
-                logger.info(f"[Client] 尾帧 Post ID: {post_ids[-1]} (对应 message 中最后一个图片 URL)")
-                logger.info(f"[Client] parentPostId (使用首帧): {payload.get('responseMetadata', {}).get('modelConfigOverride', {}).get('modelMap', {}).get('videoGenModelConfig', {}).get('parentPostId')}")
+                logger.info(
+                    f"[Client] 首帧 Post ID: {post_ids[0]} (对应 message 中第一个图片 URL)")
+                logger.info(
+                    f"[Client] 尾帧 Post ID: {post_ids[-1]} (对应 message 中最后一个图片 URL)")
+                logger.info(
+                    f"[Client] parentPostId (使用首帧): {payload.get('responseMetadata', {}).get('modelConfigOverride', {}).get('modelMap', {}).get('videoGenModelConfig', {}).get('parentPostId')}")
             logger.info(f"[Client] 完整 Payload (JSON):")
             try:
-                payload_json = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8')
+                payload_json = orjson.dumps(
+                    payload, option=orjson.OPT_INDENT_2).decode('utf-8')
                 logger.info(f"[Client] {payload_json}")
             except Exception as e:
                 logger.warning(f"[Client] 无法序列化 payload: {e}")
@@ -379,12 +407,12 @@ class GrokClient:
             "modelMode": mode,
             "isAsyncChat": False
         }
-        
+
         # 只有在 DashScope 图生图接口需要禁用视频生成时才添加 toolOverrides
         # 注意：正常聊天、Gemini、文生图、图生视频等接口不会传递 force_disable_video，因此不受影响
         if force_disable_video:
             payload["toolOverrides"] = {"videoGen": False}
-        
+
         # 打印构建的 payload（发送给 Grok API 的内容）
         logger.info("[Client] ========== 处理后发送给 Grok API 的内容 ==========")
         logger.info(f"[Client] 接口: {API_ENDPOINT}")
@@ -392,21 +420,24 @@ class GrokClient:
         logger.info(f"[Client] 模式: {payload.get('modelMode')}")
         logger.info(f"[Client] 临时会话: {payload.get('temporary')}")
         logger.info(f"[Client] 消息长度: {len(payload.get('message', ''))} 字符")
-        message_preview = payload.get('message', '')[:1000] + "..." if len(payload.get('message', '')) > 1000 else payload.get('message', '')
+        message_preview = payload.get('message', '')[:1000] + "..." if len(
+            payload.get('message', '')) > 1000 else payload.get('message', '')
         logger.info(f"[Client] 消息内容预览: {message_preview}")
-        logger.info(f"[Client] 文件附件数量: {len(payload.get('fileAttachments', []))}")
+        logger.info(
+            f"[Client] 文件附件数量: {len(payload.get('fileAttachments', []))}")
         if payload.get('fileAttachments'):
             for idx, fid in enumerate(payload.get('fileAttachments', [])):
                 logger.info(f"[Client]   [{idx}] 文件ID: {fid}")
         logger.info(f"[Client] 完整 Payload (JSON):")
         try:
-            payload_json = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8')
+            payload_json = orjson.dumps(
+                payload, option=orjson.OPT_INDENT_2).decode('utf-8')
             logger.info(f"[Client] {payload_json}")
         except Exception as e:
             logger.warning(f"[Client] 无法序列化 payload: {e}")
             logger.info(f"[Client] {payload}")
         logger.info("=" * 80)
-        
+
         return payload
 
     @staticmethod
@@ -418,34 +449,37 @@ class GrokClient:
         # 外层重试：可配置状态码（401/429等）
         retry_codes = setting.grok_config.get("retry_status_codes", [401, 429])
         MAX_OUTER_RETRY = 3
-        
+
         for outer_retry in range(MAX_OUTER_RETRY + 1):  # +1确保实际重试3次
             # 内层重试：403代理池重试
             max_403_retries = 5
             retry_403_count = 0
-            
+
             while retry_403_count <= max_403_retries:
                 try:
                     # 构建请求
                     headers = GrokClient._build_headers(token)
                     if model == "grok-imagine-0.9":
                         file_attachments = payload.get("fileAttachments", [])
-                        ref_id = post_id or (file_attachments[0] if file_attachments else "")
+                        ref_id = post_id or (
+                            file_attachments[0] if file_attachments else "")
                         if ref_id:
                             headers["Referer"] = f"https://grok.com/imagine/{ref_id}"
-                    
+
                     # 异步获取代理
                     from app.core.proxy_pool import proxy_pool
-                    
+
                     # 如果是403重试且使用代理池，强制刷新代理
                     if retry_403_count > 0 and proxy_pool._enabled:
-                        logger.info(f"[Client] 403重试 {retry_403_count}/{max_403_retries}，刷新代理...")
+                        logger.info(
+                            f"[Client] 403重试 {retry_403_count}/{max_403_retries}，刷新代理...")
                         proxy = await proxy_pool.force_refresh()
                     else:
                         proxy = await setting.get_proxy_async("service")
-                    
-                    proxies = {"http": proxy, "https": proxy} if proxy else None
-                    
+
+                    proxies = {"http": proxy,
+                               "https": proxy} if proxy else None
+
                     # 执行请求
                     response = await asyncio.to_thread(
                         curl_requests.post,
@@ -457,58 +491,66 @@ class GrokClient:
                         stream=True,
                         proxies=proxies
                     )
-                    
+
                     # 内层403重试：仅当有代理池时触发
                     if response.status_code == 403 and proxy_pool._enabled:
                         retry_403_count += 1
-                        
+
                         if retry_403_count <= max_403_retries:
-                            logger.warning(f"[Client] 遇到403错误，正在重试 ({retry_403_count}/{max_403_retries})...")
+                            logger.warning(
+                                f"[Client] 遇到403错误，正在重试 ({retry_403_count}/{max_403_retries})...")
                             await asyncio.sleep(0.5)
                             continue
-                        
+
                         # 内层重试全部失败
-                        logger.error(f"[Client] 403错误，已重试{retry_403_count-1}次，放弃")
-                    
+                        logger.error(
+                            f"[Client] 403错误，已重试{retry_403_count-1}次，放弃")
+
                     # 检查可配置状态码错误 - 外层重试
                     if response.status_code in retry_codes:
                         if outer_retry < MAX_OUTER_RETRY:
-                            delay = (outer_retry + 1) * 0.1  # 渐进延迟：0.1s, 0.2s, 0.3s
-                            logger.warning(f"[Client] 遇到{response.status_code}错误，外层重试 ({outer_retry+1}/{MAX_OUTER_RETRY})，等待{delay}s...")
+                            # 渐进延迟：0.1s, 0.2s, 0.3s
+                            delay = (outer_retry + 1) * 0.1
+                            logger.warning(
+                                f"[Client] 遇到{response.status_code}错误，外层重试 ({outer_retry+1}/{MAX_OUTER_RETRY})，等待{delay}s...")
                             await asyncio.sleep(delay)
                             break  # 跳出内层循环，进入外层重试
                         else:
-                            logger.error(f"[Client] {response.status_code}错误，已重试{outer_retry}次，放弃")
+                            logger.error(
+                                f"[Client] {response.status_code}错误，已重试{outer_retry}次，放弃")
                             GrokClient._handle_error(response, token)
-                    
+
                     # 检查响应状态
                     if response.status_code != 200:
                         GrokClient._handle_error(response, token)
-                    
+
                     # 成功 - 重置失败计数
                     asyncio.create_task(token_manager.reset_failure(token))
-                    
+
                     # 如果是重试成功，记录日志
                     if outer_retry > 0 or retry_403_count > 0:
                         logger.info(f"[Client] 重试成功！")
-                    
+
                     # 处理响应
-                    result = (GrokResponseProcessor.process_stream(response, token) if stream 
-                             else await GrokResponseProcessor.process_normal(response, token, model))
-                    
-                    asyncio.create_task(GrokClient._update_limits(token, model))
+                    result = (GrokResponseProcessor.process_stream(response, token) if stream
+                              else await GrokResponseProcessor.process_normal(response, token, model))
+
+                    asyncio.create_task(
+                        GrokClient._update_limits(token, model))
                     return result
-                    
+
                 except curl_requests.RequestsError as e:
                     logger.error(f"[Client] 网络错误: {e}")
-                    raise GrokApiException(f"网络错误: {e}", "NETWORK_ERROR") from e
+                    raise GrokApiException(
+                        f"网络错误: {e}", "NETWORK_ERROR") from e
                 except GrokApiException:
                     # 重新抛出GrokApiException（包括403错误）
                     raise
                 except Exception as e:
                     logger.error(f"[Client] 请求错误: {e}")
-                    raise GrokApiException(f"请求错误: {e}", "REQUEST_ERROR") from e
-        
+                    raise GrokApiException(
+                        f"请求错误: {e}", "REQUEST_ERROR") from e
+
         # 理论上不应该到这里，但以防万一
         raise GrokApiException("请求失败：已达到最大重试次数", "MAX_RETRIES_EXCEEDED")
 
