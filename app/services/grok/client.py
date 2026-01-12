@@ -361,7 +361,7 @@ class GrokClient:
             "message": full_message,
             "fileAttachments": img_ids,
             "imageAttachments": [],
-            "disableSearch": False,
+            "disableSearch": True,
             "enableImageGeneration": True,
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,

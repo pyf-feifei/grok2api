@@ -658,7 +658,7 @@ async def image2image(
             "message": enhanced_prompt,
             "fileAttachments": file_ids,  # 使用上传后的文件 ID
             "imageAttachments": [],
-            "disableSearch": False,
+            "disableSearch": True,
             "enableImageGeneration": True,
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,
