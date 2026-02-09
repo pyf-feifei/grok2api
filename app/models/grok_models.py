@@ -1,7 +1,53 @@
 """Grok 模型配置和枚举定义"""
 
+import re
 from enum import Enum
 from typing import Dict, Any, Tuple
+
+
+# 动态 modelMode 前缀
+_DYNAMIC_MODE_PREFIX = "MODEL_MODE_"
+
+# modelName 验证正则：必须以字母或数字开头，只能包含字母、数字、连字符、下划线、点
+_MODEL_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-\.]*$')
+
+
+def _is_dynamic_model(model: str) -> bool:
+    """检查是否为动态 modelName-modelMode 格式
+    
+    格式: modelName-MODEL_MODE_XXX
+    例如: boj-MODEL_MODE_FAST, custom-model-MODEL_MODE_HEAVY
+    """
+    if "-" not in model:
+        return False
+    
+    # 从右侧分割，获取最后一段作为 mode
+    parts = model.rsplit("-", 1)
+    if len(parts) != 2:
+        return False
+    
+    model_name, mode = parts
+    
+    # 验证 modelName
+    if not model_name or not _MODEL_NAME_PATTERN.match(model_name):
+        return False
+    
+    # 验证 mode 格式（必须以 MODEL_MODE_ 开头）
+    if not mode.startswith(_DYNAMIC_MODE_PREFIX):
+        return False
+    
+    return True
+
+
+def _parse_dynamic_model(model: str) -> Tuple[str, str]:
+    """解析动态模型，返回 (modelName, modelMode)
+    
+    前提: 已通过 _is_dynamic_model 验证
+    """
+    model_name, mode = model.rsplit("-", 1)
+    return model_name, f"{_DYNAMIC_MODE_PREFIX}{mode[len(_DYNAMIC_MODE_PREFIX):]}"
+
+
 
 
 # 模型配置
@@ -152,24 +198,62 @@ class Models(Enum):
 
     @classmethod
     def is_valid_model(cls, model: str) -> bool:
-        """检查模型是否有效"""
-        return model in _MODEL_CONFIG
+        """检查模型是否有效
+        
+        支持:
+        1. 预定义模型（如 grok-4-heavy）
+        2. 动态 modelName-modelMode 格式（如 boj-MODEL_MODE_FAST）
+        """
+        # 预定义模型
+        if model in _MODEL_CONFIG:
+            return True
+        
+        # 动态 modelName-modelMode 格式
+        return _is_dynamic_model(model)
 
     @classmethod
     def to_grok(cls, model: str) -> Tuple[str, str]:
         """转换为Grok内部模型名和模式
 
         Returns:
-            (模型名, 模式类型) 元组
+        (模型名, 模式类型) 元组
+        
+        支持:
+        1. 预定义模型 - 使用配置中的映射
+        2. 动态 modelName-modelMode 格式 - 解析为 (modelName, modelMode)
+        3. 其他 - 默认返回 (model, MODEL_MODE_FAST)
         """
         config = _MODEL_CONFIG.get(model)
-        return config["grok_model"] if config else (model, "MODEL_MODE_FAST")
+        if config:
+            return config["grok_model"]
+        
+        # 动态解析 modelName-modelMode
+        if _is_dynamic_model(model):
+            model_name, mode = _parse_dynamic_model(model)
+            return (model_name, mode)
+        
+        # 默认回退
+        return (model, "MODEL_MODE_FAST")
 
     @classmethod
     def to_rate_limit(cls, model: str) -> str:
-        """转换为速率限制模型名"""
+        """转换为速率限制模型名
+        
+        支持:
+        1. 预定义模型 - 使用配置中的 rate_limit_model
+        2. 动态 modelName-modelMode 格式 - 使用 modelName 作为速率限制标识
+        3. 其他 - 原样返回
+        """
         config = _MODEL_CONFIG.get(model)
-        return config["rate_limit_model"] if config else model
+        if config:
+            return config["rate_limit_model"]
+        
+        # 动态模型使用 modelName 部分
+        if _is_dynamic_model(model):
+            model_name, _ = _parse_dynamic_model(model)
+            return model_name
+        
+        return model
 
     @classmethod
     def get_all_model_names(cls) -> list[str]:
