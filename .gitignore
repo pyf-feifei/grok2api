@@ -188,4 +188,3 @@ data/
 build-and-push.ps1
 build-and-push.sh
 DOCKER_BUILD.md
-
