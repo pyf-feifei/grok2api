@@ -564,25 +564,30 @@ class GrokClient:
 
     @staticmethod
     def _handle_error(response, token: str):
-        """处理错误"""
-        if response.status_code == 403:
-            # 尝试获取更详细的错误信息
+        """处理错误 - 透传上游原始错误信息"""
+        try:
+            data = response.json()
+            msg = str(data)
+        except Exception:
             try:
-                error_detail = response.text[:500] if hasattr(
-                    response, 'text') else ""
-                logger.debug(f"[Client] 403错误详情: {error_detail}")
-            except:
-                pass
-            msg = "您的IP被拦截，请尝试以下方法之一: 1.更换IP 2.使用代理 3.配置CF值"
-            data = {"cf_blocked": True, "status": 403}
-            logger.warning(f"[Client] {msg}")
-        else:
-            try:
-                data = response.json()
-                msg = str(data)
-            except:
-                data = response.text
+                raw = response.text
+                data = raw[:500] if raw else ""
                 msg = data[:200] if data else "未知错误"
+            except Exception:
+                data = ""
+                msg = "未知错误"
+
+        if response.status_code == 403:
+            # 判断是 CF 拦截（HTML/空响应）还是上游业务错误（JSON）
+            is_cf_block = not isinstance(data, dict)
+            if is_cf_block:
+                cf_msg = "您的IP被拦截，请尝试以下方法之一: 1.更换IP 2.使用代理 3.配置CF值"
+                logger.warning(f"[Client] {cf_msg} (原始响应: {msg[:200]})")
+                data = {"cf_blocked": True, "status": 403, "upstream_detail": msg[:200]}
+                msg = cf_msg
+            else:
+                # 上游返回了 JSON 错误（如 Model is not found），直接透传
+                logger.warning(f"[Client] 上游403错误: {msg}")
 
         asyncio.create_task(token_manager.record_failure(
             token, response.status_code, msg))

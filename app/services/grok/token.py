@@ -430,8 +430,11 @@ class GrokTokenManager:
     async def record_failure(self, auth_token: str, status: int, msg: str) -> None:
         """记录失败"""
         try:
-            if status == STATSIG_INVALID:
+            if status == STATSIG_INVALID and "cf_blocked" in msg:
                 logger.warning("[Token] IP被Block，请: 1.更换IP 2.使用代理 3.配置CF值")
+                return
+            if status == STATSIG_INVALID:
+                logger.warning(f"[Token] 上游403错误: {msg[:200]}")
                 return
 
             sso = self._extract_sso(auth_token)

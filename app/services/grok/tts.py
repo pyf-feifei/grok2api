@@ -363,19 +363,29 @@ class GrokTTSService:
 
     @staticmethod
     def _handle_error(response, token: str):
-        """处理错误响应"""
-        if response.status_code == 403:
-            msg = "您的IP被拦截，请尝试以下方法之一: 1.更换IP 2.使用代理 3.配置CF值"
-            data = {"cf_blocked": True, "status": 403}
-            logger.warning(f"[TTS] {msg}")
-        else:
+        """处理错误响应 - 透传上游原始错误信息"""
+        try:
+            data = response.json()
+            msg = str(data)
+        except Exception:
             try:
-                data = response.json()
-                msg = str(data)
-            except:
-                data = response.text
+                raw = response.text
+                data = raw[:500] if raw else ""
                 msg = data[:200] if data else "未知错误"
-        
+            except Exception:
+                data = ""
+                msg = "未知错误"
+
+        if response.status_code == 403:
+            is_cf_block = not isinstance(data, dict)
+            if is_cf_block:
+                cf_msg = "您的IP被拦截，请尝试以下方法之一: 1.更换IP 2.使用代理 3.配置CF值"
+                logger.warning(f"[TTS] {cf_msg} (原始响应: {msg[:200]})")
+                data = {"cf_blocked": True, "status": 403, "upstream_detail": msg[:200]}
+                msg = cf_msg
+            else:
+                logger.warning(f"[TTS] 上游403错误: {msg}")
+
         asyncio.create_task(token_manager.record_failure(
             token, response.status_code, msg))
         raise GrokApiException(
