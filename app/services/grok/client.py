@@ -238,7 +238,13 @@ class GrokClient:
                         if url := item.get("image_url", {}).get("url"):
                             images.append(url)
             else:
-                texts.append(content)
+                # tool-calls 场景下 assistant 可能只有 tool_calls 而无 content
+                if content is None:
+                    continue
+                if isinstance(content, str):
+                    texts.append(content)
+                else:
+                    texts.append(str(content))
 
         return "".join(texts), images, system_prompt
 

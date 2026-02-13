@@ -9,6 +9,7 @@ from app.core.exception import GrokApiException
 from app.core.logger import logger
 from app.services.grok.client import GrokClient
 from app.services.anthropic.converter import AnthropicConverter
+from app.services.openai.tool_adapter import OpenAIToolAdapter
 from app.models.openai_schema import OpenAIChatRequest
 
 
@@ -58,11 +59,25 @@ async def chat_completions(request: OpenAIChatRequest, _: Optional[str] = Depend
         
         # 调用Grok客户端
         result = await GrokClient.openai_to_grok(request_dict)
+        available_tools = request_dict.get("tools") or []
+        if available_tools:
+            logger.info(f"[Chat] 检测到 OpenAI tools: {len(available_tools)} 个")
         
         # 流式响应
         if request.stream:
+            if available_tools:
+                async def openai_stream_with_tools():
+                    async for chunk in OpenAIToolAdapter.adapt_stream(
+                        result, available_tools, request_dict.get("messages", [])
+                    ):
+                        yield chunk
+
+                stream_content = openai_stream_with_tools()
+            else:
+                stream_content = result
+
             return StreamingResponse(
-                content=result,
+                content=stream_content,
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -72,6 +87,10 @@ async def chat_completions(request: OpenAIChatRequest, _: Optional[str] = Depend
             )
         
         # 非流式响应
+        if available_tools:
+            result = OpenAIToolAdapter.adapt_non_stream(
+                result, available_tools, request_dict.get("messages", [])
+            )
         return result
         
     except GrokApiException as e:

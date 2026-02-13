@@ -18,6 +18,13 @@ class OpenAIChatRequest(BaseModel):
     temperature: Optional[float] = Field(0.7, ge=0, le=2, description="采样温度")
     max_tokens: Optional[int] = Field(None, ge=1, le=100000, description="最大Token数")
     top_p: Optional[float] = Field(1.0, ge=0, le=1, description="采样参数")
+    tools: Optional[List[Dict[str, Any]]] = Field(None, description="工具列表（OpenAI 格式）")
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(
+        None, description="工具选择策略（auto/none/required 或指定函数）"
+    )
+    parallel_tool_calls: Optional[bool] = Field(
+        None, description="是否允许并行工具调用"
+    )
     aspect_ratio: Optional[str] = Field(None, description="视频宽高比（如 '16:9', '2:3', '1:1'）")
     duration: Optional[int] = Field(None, ge=1, le=60, description="视频时长（秒），符合 OpenAI Sora API 格式")
     video_length: Optional[int] = Field(None, ge=1, le=60, description="视频长度（秒），兼容参数，优先使用 duration")
@@ -34,13 +41,29 @@ class OpenAIChatRequest(BaseModel):
                 raise HTTPException(status_code=400, detail="每个消息必须是字典")
             if 'role' not in msg:
                 raise HTTPException(status_code=400, detail="消息缺少 'role' 字段")
-            if 'content' not in msg:
-                raise HTTPException(status_code=400, detail="消息缺少 'content' 字段")
-            if msg['role'] not in ['system', 'user', 'assistant']:
+            role = msg['role']
+            if role not in ['system', 'user', 'assistant', 'tool']:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"无效角色 '{msg['role']}', 必须是 system/user/assistant"
+                    detail=f"无效角色 '{role}', 必须是 system/user/assistant/tool"
                 )
+
+            # assistant: 允许仅返回 tool_calls（content 可为空）
+            if role == 'assistant':
+                if 'content' not in msg and 'tool_calls' not in msg:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="assistant 消息缺少 'content' 或 'tool_calls' 字段"
+                    )
+            # tool: 必须包含 content 和 tool_call_id
+            elif role == 'tool':
+                if 'content' not in msg:
+                    raise HTTPException(status_code=400, detail="tool 消息缺少 'content' 字段")
+                if 'tool_call_id' not in msg:
+                    raise HTTPException(status_code=400, detail="tool 消息缺少 'tool_call_id' 字段")
+            else:
+                if 'content' not in msg:
+                    raise HTTPException(status_code=400, detail="消息缺少 'content' 字段")
 
         return v
 
@@ -60,7 +83,8 @@ class OpenAIChatRequest(BaseModel):
 class OpenAIChatCompletionMessage(BaseModel):
     """聊天完成消息"""
     role: str = Field(..., description="角色")
-    content: str = Field(..., description="内容")
+    content: Optional[str] = Field(default=None, description="内容")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(default=None, description="工具调用列表")
     reference_id: Optional[str] = Field(default=None, description="参考ID")
     annotations: Optional[List[str]] = Field(default=None, description="注释")
 
@@ -85,8 +109,9 @@ class OpenAIChatCompletionResponse(BaseModel):
 
 class OpenAIChatCompletionChunkMessage(BaseModel):
     """流式消息片段"""
-    role: str = Field(..., description="角色")
-    content: str = Field(..., description="内容")
+    role: Optional[str] = Field(default=None, description="角色")
+    content: Optional[str] = Field(default=None, description="内容")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(default=None, description="工具调用列表")
 
 
 class OpenAIChatCompletionChunkChoice(BaseModel):
