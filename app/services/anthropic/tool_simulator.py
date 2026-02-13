@@ -1451,6 +1451,107 @@ class ToolSimulator:
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()
 
+    def _looks_like_code_line(self, line: str, file_ext: str) -> bool:
+        """判断一行文本是否更像代码而非自然语言"""
+        s = line.strip()
+        if not s:
+            return False
+
+        # 通用代码特征
+        generic_markers = (
+            s.startswith(("<", "{", "}", "[", "]", "(", ")", "#!", "import ", "from ", "def ", "class ", "const ", "let ", "var ", "function ", "if ", "for ", "while ", "return ", "async ")),
+            "=" in s,
+            ";" in s,
+            s.endswith(("{", "}", ";", ":", ",")),
+        )
+        if any(generic_markers):
+            return True
+
+        # 按扩展名增强判断
+        if file_ext in {"html", "htm"}:
+            return "<" in s and ">" in s
+        if file_ext in {"py"}:
+            return bool(re.search(r'\b(import|from|def|class|if|for|while|return|try|except|with)\b', s))
+        if file_ext in {"js", "ts", "jsx", "tsx"}:
+            return bool(re.search(r'\b(const|let|var|function|export|import|class|return|if|for|while|async|await)\b', s))
+        if file_ext in {"json"}:
+            return s.startswith("{") or s.startswith("[") or s.startswith('"')
+        if file_ext in {"yml", "yaml"}:
+            return ":" in s and not s.startswith("http")
+        if file_ext in {"css", "scss", "sass"}:
+            return "{" in s or "}" in s or ":" in s
+        if file_ext in {"sh", "bash"}:
+            return bool(re.search(r'\b(echo|cd|ls|pwd|mkdir|rm|cp|mv|cat|grep|awk|sed|export)\b', s))
+        if file_ext in {"toml"}:
+            return "=" in s or s.startswith("[")
+        if file_ext in {"md"}:
+            return s.startswith(("#", "-", "*", "```"))
+        return False
+
+    def _trim_trailing_explanation(self, content: str) -> str:
+        """裁剪代码后面的解释性文本（保守）"""
+        lines = content.splitlines()
+        stop_prefixes = (
+            "玩法说明",
+            "可快速改进",
+            "需要我帮你",
+            "你现在最想",
+            "如果你想继续优化",
+            "使用说明",
+        )
+        stop_index = None
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if any(s.startswith(p) for p in stop_prefixes):
+                stop_index = i
+                break
+        if stop_index is not None:
+            lines = lines[:stop_index]
+        return "\n".join(lines).strip()
+
+    def _extract_plain_text_write_candidate(self, text: str) -> Optional[Tuple[str, str]]:
+        """从无代码块文本中提取 (file_path, content)"""
+        best_match = None
+        for pattern in self.FILE_PATH_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+            candidate = match.group(1).replace('\\', '/')
+            if self._is_valid_file_path(candidate):
+                best_match = (candidate, match.end())
+                break
+        if not best_match:
+            return None
+
+        file_path, start_pos = best_match
+        file_ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+
+        # HTML 优先整文档提取
+        if file_ext in {"html", "htm"}:
+            html_match = re.search(r'<!DOCTYPE\s+html[\s\S]*?</html>', text, flags=re.IGNORECASE)
+            if html_match:
+                html_content = html_match.group(0).strip()
+                return file_path, html_content
+
+        # 通用：从文件路径之后寻找首个“代码起始行”
+        tail = text[start_pos:].strip()
+        if not tail:
+            return None
+        lines = tail.splitlines()
+        code_start = None
+        for i, line in enumerate(lines):
+            if self._looks_like_code_line(line, file_ext):
+                code_start = i
+                break
+        if code_start is None:
+            return None
+
+        content = "\n".join(lines[code_start:]).strip()
+        content = self._trim_trailing_explanation(content)
+        if len(content) < 20:
+            return None
+        return file_path, content
+
     def parse_response(self, text: str, user_message: str = '') -> Tuple[str, List[ToolCall]]:
         """解析 Grok 响应，提取工具调用
 
@@ -1572,6 +1673,15 @@ class ToolSimulator:
         # 跟踪已处理的文件路径，避免重复
         processed_files = set()
         processed_commands = set()
+
+        # 1.1 兼容“纯文本整页代码”场景（无 ``` 代码块）
+        if not code_blocks and self.has_tool('Write'):
+            plain_candidate = self._extract_plain_text_write_candidate(remaining_text)
+            if plain_candidate:
+                file_path, file_content = plain_candidate
+                tool_calls.append(self.create_write_tool_call(file_path, file_content))
+                processed_files.add(file_path)
+                logger.info(f"[ToolSimulator] 纯文本自动创建 Write 调用: {file_path}")
 
         # 2. 检测 Read 意图
         if self.has_tool('Read'):
