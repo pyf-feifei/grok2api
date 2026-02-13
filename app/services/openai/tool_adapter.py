@@ -6,7 +6,6 @@
 import time
 import uuid
 import orjson
-import re
 from typing import Any, Dict, List, Optional, AsyncGenerator
 
 from app.core.logger import logger
@@ -63,69 +62,6 @@ class OpenAIToolAdapter:
         return normalized
 
     @staticmethod
-    def _extract_openai_functions(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        """提取 OpenAI function 工具定义"""
-        functions: List[Dict[str, Any]] = []
-        for t in tools or []:
-            if not isinstance(t, dict):
-                continue
-            fn = t.get("function", {})
-            if isinstance(fn, dict) and fn.get("name"):
-                functions.append(fn)
-        return functions
-
-    @staticmethod
-    def _infer_library_name(user_message: str) -> str:
-        """从用户消息推断库名（优先 python）"""
-        text = (user_message or "").lower()
-        if "python" in text:
-            return "python"
-        if "react" in text:
-            return "react"
-        if "next" in text:
-            return "next.js"
-        return "python"
-
-    @classmethod
-    def _build_fallback_tool_calls(
-        cls,
-        tools: Optional[List[Dict[str, Any]]],
-        user_message: str
-    ) -> List[Dict[str, Any]]:
-        """当模型未返回工具调用时，构建兜底 tool_calls（优先 context7 resolve）"""
-        functions = cls._extract_openai_functions(tools)
-        if not functions:
-            return []
-
-        # 优先命中 context7 resolve-library-id
-        for fn in functions:
-            name = fn.get("name", "")
-            lname = name.lower()
-            if "context7" in lname and "resolve" in lname:
-                args = {
-                    "query": user_message or "latest python documentation",
-                    "libraryName": cls._infer_library_name(user_message)
-                }
-                return [{
-                    "index": 0,
-                    "id": f"call_{uuid.uuid4().hex[:24]}",
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": orjson.dumps(args).decode("utf-8")
-                    }
-                }]
-
-        # 次优：若有 query-docs 且可接受自由 query 参数，则兜底调用
-        for fn in functions:
-            name = fn.get("name", "")
-            lname = name.lower()
-            if "context7" in lname and "query" in lname:
-                # query-docs 通常要求 libraryId，缺失会失败，不在此强行调用
-                continue
-
-        return []
-
     @staticmethod
     def _to_openai_tool_calls(tool_calls: List[Any]) -> List[Dict[str, Any]]:
         """ToolSimulator ToolCall -> OpenAI tool_calls"""
@@ -166,20 +102,8 @@ class OpenAIToolAdapter:
         simulator = ToolSimulator(tool_defs)
         cleaned_text, parsed_calls = simulator.parse_response(original_text, user_message)
         if not parsed_calls:
-            fallback_calls = cls._build_fallback_tool_calls(tools, user_message)
-            if not fallback_calls:
-                return response
-
-            response.choices[0] = OpenAIChatCompletionChoice(
-                index=0,
-                message=OpenAIChatCompletionMessage(
-                    role="assistant",
-                    content=None,
-                    tool_calls=fallback_calls
-                ),
-                finish_reason="tool_calls"
-            )
-            logger.info(f"[OpenAI] 非流式兜底工具调用: {fallback_calls[0]['function']['name']}")
+            # 关键修复：不要在模型未生成工具调用时强制“兜底”注入 tool_calls，
+            # 否则会导致客户端反复调用同一工具并进入死循环。
             return response
 
         openai_tool_calls = cls._to_openai_tool_calls(parsed_calls)
@@ -252,59 +176,6 @@ class OpenAIToolAdapter:
 
         # 没有工具调用，按原始 SSE 回放，保持兼容
         if not parsed_calls:
-            fallback_calls = cls._build_fallback_tool_calls(tools, user_message)
-            if fallback_calls:
-                meta = first_meta or {
-                    "id": f"chatcmpl-{uuid.uuid4()}",
-                    "model": "grok-4-1",
-                    "created": int(time.time()),
-                }
-                # role 起始块
-                yield (
-                    "data: " + orjson.dumps({
-                        "id": meta["id"],
-                        "object": "chat.completion.chunk",
-                        "created": meta["created"],
-                        "model": meta["model"],
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"role": "assistant"},
-                            "finish_reason": None
-                        }]
-                    }).decode("utf-8") + "\n\n"
-                )
-
-                # 仅发一个工具调用，满足“每轮必须工具调用”
-                yield (
-                    "data: " + orjson.dumps({
-                        "id": meta["id"],
-                        "object": "chat.completion.chunk",
-                        "created": meta["created"],
-                        "model": meta["model"],
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"tool_calls": [fallback_calls[0]]},
-                            "finish_reason": None
-                        }]
-                    }).decode("utf-8") + "\n\n"
-                )
-                yield (
-                    "data: " + orjson.dumps({
-                        "id": meta["id"],
-                        "object": "chat.completion.chunk",
-                        "created": meta["created"],
-                        "model": meta["model"],
-                        "choices": [{
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "tool_calls"
-                        }]
-                    }).decode("utf-8") + "\n\n"
-                )
-                yield "data: [DONE]\n\n"
-                logger.info(f"[OpenAI] 流式兜底工具调用: {fallback_calls[0]['function']['name']}")
-                return
-
             for raw in raw_chunks:
                 yield raw
             yield "data: [DONE]\n\n"
