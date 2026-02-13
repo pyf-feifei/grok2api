@@ -39,22 +39,6 @@ class OpenAIToolAdapter:
         return ""
 
     @staticmethod
-    def _count_context7_failures(messages: List[Dict[str, Any]]) -> int:
-        """统计近期 context7 调用失败次数（用于防循环）"""
-        count = 0
-        for msg in messages or []:
-            if msg.get("role") != "tool":
-                continue
-            content = str(msg.get("content", "") or "").lower()
-            if (
-                "error searching libraries" in content
-                or "fetch failed" in content
-                or "context7" in content and "error" in content
-            ):
-                count += 1
-        return count
-
-    @staticmethod
     def _normalize_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """OpenAI tools -> ToolSimulator 可识别格式"""
         if not tools:
@@ -182,13 +166,6 @@ class OpenAIToolAdapter:
         simulator = ToolSimulator(tool_defs)
         cleaned_text, parsed_calls = simulator.parse_response(original_text, user_message)
         if not parsed_calls:
-            failure_count = cls._count_context7_failures(messages)
-            if failure_count >= 2:
-                logger.warning(
-                    f"[OpenAI] 检测到 context7 连续失败 {failure_count} 次，跳过兜底工具调用以防循环"
-                )
-                return response
-
             fallback_calls = cls._build_fallback_tool_calls(tools, user_message)
             if not fallback_calls:
                 return response
@@ -275,16 +252,6 @@ class OpenAIToolAdapter:
 
         # 没有工具调用，按原始 SSE 回放，保持兼容
         if not parsed_calls:
-            failure_count = cls._count_context7_failures(messages)
-            if failure_count >= 2:
-                logger.warning(
-                    f"[OpenAI] 检测到 context7 连续失败 {failure_count} 次，流式跳过兜底工具调用以防循环"
-                )
-                for raw in raw_chunks:
-                    yield raw
-                yield "data: [DONE]\n\n"
-                return
-
             fallback_calls = cls._build_fallback_tool_calls(tools, user_message)
             if fallback_calls:
                 meta = first_meta or {
